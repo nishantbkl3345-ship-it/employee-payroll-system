@@ -233,6 +233,67 @@ describe('upload and processing', () => {
     expect(after.json().total).toBe(before.json().total);
   });
 
+  it('falls back to the organisation defaults when an overtime field is left blank', async () => {
+    // A cleared number input posts "", which must not become a 0 threshold —
+    // that would classify every hour as overtime.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/jobs/upload?autoProcess=false&dailyThreshold=&weeklyThreshold=&multiplier=',
+      headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${BOUNDARY}` },
+      payload: multipart('timesheet.csv', SAMPLE),
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().job.rules).toEqual({});
+
+    const blankRulesJobId = res.json().job.id as string;
+    await runPayrollJob({ db, jobId: blankRulesJobId, rowDelayMs: 0, concurrency: 4 });
+
+    const metrics = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${blankRulesJobId}/metrics`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const totals = metrics.json().metrics.totals;
+    expect(totals.regularHours).toBe(24);
+    expect(totals.overtimeHours).toBe(5);
+    expect(totals.grossPay).toBe(649.5);
+  });
+
+  it('rejects an out-of-range overtime rule with 400 and names the field', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/jobs/upload?multiplier=0.5',
+      headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${BOUNDARY}` },
+      payload: multipart('timesheet.csv', SAMPLE),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('invalid_overtime_rules');
+    expect(res.json().message).toContain('Overtime multiplier');
+  });
+
+  it('honours overtime rules that are supplied', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/jobs/upload?autoProcess=false&dailyThreshold=10&weeklyThreshold=40&multiplier=2',
+      headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${BOUNDARY}` },
+      payload: multipart('timesheet.csv', SAMPLE),
+    });
+    expect(res.json().job.rules).toEqual({ dailyThreshold: 10, weeklyThreshold: 40, multiplier: 2 });
+
+    await runPayrollJob({ db, jobId: res.json().job.id, rowDelayMs: 0, concurrency: 4 });
+    const metrics = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${res.json().job.id}/metrics`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // At a 10h daily threshold only Vikram's 12h shift runs over: 9 + 8 + 10
+    // regular, 2 overtime paid at 2x instead of the default 1.5x.
+    const totals = metrics.json().metrics.totals;
+    expect(totals.regularHours).toBe(27);
+    expect(totals.overtimeHours).toBe(2);
+    expect(totals.overtimePay).toBe(2 * 18 * 2);
+  });
+
   it('re-runs payroll after a rate correction', async () => {
     const res = await app.inject({
       method: 'PATCH',

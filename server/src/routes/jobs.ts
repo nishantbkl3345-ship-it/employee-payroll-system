@@ -13,10 +13,26 @@ import { registerExportRoutes } from './exports.js';
 
 const ACCEPTED_EXTENSIONS = ['.csv', '.json', '.txt'];
 
+/**
+ * An overtime rule left blank in the upload form means "use the organisation's
+ * setting", so it has to arrive as undefined. Coercing "" would make it 0,
+ * which is a valid threshold meaning "every hour is overtime" — silently wrong
+ * pay rather than an error.
+ */
+const overtimeRule = (min: number, max: number, label: string) =>
+  z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.coerce
+      .number({ invalid_type_error: `${label} must be a number` })
+      .min(min, `${label} must be at least ${min}`)
+      .max(max, `${label} must be at most ${max}`)
+      .optional(),
+  );
+
 const uploadRulesSchema = z.object({
-  dailyThreshold: z.coerce.number().min(0).max(24).optional(),
-  weeklyThreshold: z.coerce.number().min(0).max(168).optional(),
-  multiplier: z.coerce.number().min(1).max(5).optional(),
+  dailyThreshold: overtimeRule(0, 24, 'Daily threshold'),
+  weeklyThreshold: overtimeRule(0, 168, 'Weekly threshold'),
+  multiplier: overtimeRule(1, 5, 'Overtime multiplier'),
 });
 
 /** Payroll table sort keys, mapped to real columns so the input never reaches SQL. */
@@ -80,7 +96,14 @@ export function registerJobRoutes(app: FastifyInstance, db: Db): void {
         throw error;
       }
 
-      const rules = uploadRulesSchema.parse(req.query);
+      const parsedRules = uploadRulesSchema.safeParse(req.query);
+      if (!parsedRules.success) {
+        return reply.code(400).send({
+          error: 'invalid_overtime_rules',
+          message: parsedRules.error.issues.map((issue) => issue.message).join('; '),
+        });
+      }
+      const rules = parsedRules.data;
 
       // Parse before creating the job so an unreadable file fails fast with a
       // useful message instead of leaving a failed job behind.
