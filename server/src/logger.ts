@@ -26,8 +26,3 @@ export const logger = pino(
       })
     : undefined,
 );
-
-export type Logger = pino.Logger;
-
-export const jobLogger = (correlationId: string, jobId?: string) =>
-  logger.child({ correlationId, jobId });

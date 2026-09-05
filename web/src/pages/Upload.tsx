@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { PageHeading } from '../components/PageHeading';
 import { Card, ErrorNote, ProgressBar, Spinner } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { num } from '../lib/format';
 import { useJobStream } from '../lib/useJobStream';
-import { PageHeading } from './Dashboard';
 
 const STAGES = [
   ['uploaded', 'Uploaded'],

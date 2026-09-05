@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { verifyToken } from '../auth/index.js';
-import { bus, type JobEvent } from '../lib/bus.js';
+import { jobEvents, type JobEvent } from '../jobs/progress.js';
 import { logger } from '../logger.js';
 
 interface Client {
@@ -56,7 +56,7 @@ export function attachWebSockets(server: Server): { close: () => Promise<void> }
     socket.on('error', () => clients.delete(client));
   });
 
-  const unsubscribe = bus.onJob((event: JobEvent) => {
+  const unsubscribe = jobEvents.subscribe((event: JobEvent) => {
     const payload = JSON.stringify(event);
     for (const client of clients) {
       if (client.orgId !== event.orgId) continue;

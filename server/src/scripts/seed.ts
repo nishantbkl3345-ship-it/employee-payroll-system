@@ -10,8 +10,8 @@ import { hashPassword } from '../auth/index.js';
 import { config, ROOT } from '../config.js';
 import { closeDb, getDb } from '../db/index.js';
 import { migrate } from '../db/migrations/index.js';
-import { processJob } from '../jobs/processor.js';
-import { correlationId } from '../lib/ids.js';
+import { runPayrollJob } from '../jobs/processor.js';
+import { newCorrelationId } from '../jobs/events.js';
 import { logger } from '../logger.js';
 import { generate } from './generate-sample.js';
 
@@ -67,11 +67,11 @@ async function main(): Promise<void> {
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO jobs (org_id, uploaded_by, correlation_id, filename, status, stage)
        VALUES ($1, $2, $3, $4, 'pending', 'uploaded') RETURNING id`,
-      [orgId, adminRows[0].id, correlationId(), file.name],
+      [orgId, adminRows[0].id, newCorrelationId(), file.name],
     );
     await db.query('INSERT INTO job_files (job_id, content) VALUES ($1, $2)', [rows[0].id, file.content]);
     logger.info({ file: file.name }, 'processing seed job');
-    await processJob({ db, jobId: rows[0].id, rowDelayMs: 0 });
+    await runPayrollJob({ db, jobId: rows[0].id, rowDelayMs: 0 });
   }
 
   const { rows: empRows } = await db.query<{ employee_code: string }>(

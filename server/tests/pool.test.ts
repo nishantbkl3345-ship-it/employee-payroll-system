@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runPool } from '../src/lib/pool.js';
-import { sleep } from '../src/lib/sleep.js';
+import { runWorkerPool, sleep } from '../src/jobs/workerPool.js';
 
 describe('worker pool', () => {
   it('processes tasks concurrently rather than sequentially', async () => {
@@ -8,7 +7,7 @@ describe('worker pool', () => {
     const delay = 20;
 
     const started = Date.now();
-    const out = await runPool(items, async (i) => {
+    const out = await runWorkerPool(items, async (i) => {
       await sleep(delay);
       return i * 2;
     }, { concurrency: 8 });
@@ -22,7 +21,7 @@ describe('worker pool', () => {
   it('never exceeds the configured concurrency', async () => {
     let inFlight = 0;
     let peak = 0;
-    await runPool(
+    await runWorkerPool(
       Array.from({ length: 50 }, (_, i) => i),
       async () => {
         inFlight++;
@@ -38,7 +37,7 @@ describe('worker pool', () => {
 
   it('retries a flaky task and then succeeds', async () => {
     const attempts = new Map<number, number>();
-    const out = await runPool(
+    const out = await runWorkerPool(
       [0, 1, 2],
       async (i) => {
         const n = (attempts.get(i) ?? 0) + 1;
@@ -53,7 +52,7 @@ describe('worker pool', () => {
   });
 
   it('isolates a permanently failing task instead of rejecting the run', async () => {
-    const out = await runPool(
+    const out = await runWorkerPool(
       [0, 1, 2, 3],
       async (i) => {
         if (i === 2) throw new Error('always broken');
@@ -68,7 +67,7 @@ describe('worker pool', () => {
 
   it('reports progress once per settled task', async () => {
     const seen: number[] = [];
-    await runPool([1, 2, 3, 4, 5], async (x) => x, {
+    await runWorkerPool([1, 2, 3, 4, 5], async (x) => x, {
       concurrency: 2,
       onSettled: (done) => seen.push(done),
     });

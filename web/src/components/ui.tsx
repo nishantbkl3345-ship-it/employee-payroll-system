@@ -190,3 +190,63 @@ export function SortHeader({
     </th>
   );
 }
+
+/** Placeholder rows that keep a table's height stable while it loads. */
+export function TableSkeleton({ rows = 5, columns = 5 }: { rows?: number; columns?: number }) {
+  return (
+    <div className="divide-y divide-surface-line" aria-hidden="true">
+      {Array.from({ length: rows }, (_, row) => (
+        <div key={row} className="flex gap-4 px-4 py-3">
+          {Array.from({ length: columns }, (_, column) => (
+            <div
+              key={column}
+              className="h-4 flex-1 animate-pulse rounded bg-surface-sunken"
+              style={{ maxWidth: column === 0 ? 'none' : '6rem' }}
+            />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function Pager({
+  page,
+  pageSize,
+  total,
+  onChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (pages <= 1) return null;
+
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-surface-line px-4 py-3">
+      <span className="text-xs text-ink-soft">
+        Page {page + 1} of {pages}
+      </span>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="btn-secondary px-3 py-1.5 text-xs"
+          disabled={page === 0}
+          onClick={() => onChange(page - 1)}
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          className="btn-secondary px-3 py-1.5 text-xs"
+          disabled={page + 1 >= pages}
+          onClick={() => onChange(page + 1)}
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}

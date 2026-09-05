@@ -1,9 +1,13 @@
 {
-  "name": "timesheet-payroll",
+  "name": "timeforge",
   "private": true,
   "version": "1.0.0",
-  "description": "Employee Timesheet & Payroll Calculator - bulk ingest, concurrent validation, payroll math, dashboard",
-  "workspaces": ["server", "web"],
+  "description": "TimeForge \u2014 employee timesheet ingestion, payroll calculation and reporting",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "npm run dev -w server",
@@ -12,10 +16,18 @@
     "start": "npm run start -w server",
     "test": "npm run test -w server",
     "seed": "npm run seed -w server",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "@eslint/js": "^9.39.5",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "typescript-eslint": "^8.69.0"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

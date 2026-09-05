@@ -2,20 +2,15 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY server/package.json ./server/
 COPY web/package.json ./web/
-RUN npm install --no-audit --no-fund
+RUN npm ci
 
-COPY tsconfig*.json ./
 COPY server ./server
 COPY web ./web
-COPY samples ./samples
 
 RUN npm run build -w web && npm run build -w server
-
-# Prune to production dependencies for the runtime image.
-RUN npm prune --omit=dev
 
 # ---------- runtime ----------
 FROM node:22-alpine AS runtime
@@ -24,17 +19,17 @@ ENV NODE_ENV=production
 ENV LOG_PRETTY=false
 ENV WEB_DIST=/app/web/dist
 
-RUN addgroup -S app && adduser -S app -G app
+COPY package.json package-lock.json ./
+COPY server/package.json ./server/
+# Production dependencies only; the web workspace is build-time only.
+RUN npm ci --omit=dev --workspace server --include-workspace-root && npm cache clean --force
 
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/server/package.json ./server/package.json
 COPY --from=build /app/server/dist ./server/dist
-COPY --from=build /app/server/node_modules ./server/node_modules
 COPY --from=build /app/web/dist ./web/dist
-COPY --from=build /app/samples ./samples
+COPY samples ./samples
 
-RUN mkdir -p /app/.data && chown -R app:app /app
+RUN addgroup -S app && adduser -S app -G app \
+  && mkdir -p /app/.data && chown -R app:app /app
 USER app
 
 EXPOSE 4000

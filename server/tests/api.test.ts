@@ -3,8 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { createTestDb, type Db } from '../src/db/index.js';
 import { migrate } from '../src/db/migrations/index.js';
-import { processJob } from '../src/jobs/processor.js';
-import { correlationId } from '../src/lib/ids.js';
+import { runPayrollJob } from '../src/jobs/processor.js';
 
 const SAMPLE = `employee_id,employee_name,department,date,clock_in,clock_out,hourly_rate
 EMP-101,Sara Iyer,Engineering,2025-01-13,09:00,18:00,25.00
@@ -51,7 +50,7 @@ const uploadAndProcess = async (token: string, content = SAMPLE) => {
   });
   expect(res.statusCode).toBe(201);
   const jobId = res.json().job.id as string;
-  await processJob({ db, jobId, rowDelayMs: 0, concurrency: 4 });
+  await runPayrollJob({ db, jobId, rowDelayMs: 0, concurrency: 4 });
   return jobId;
 };
 
@@ -254,8 +253,8 @@ describe('upload and processing', () => {
     });
     const events = res.json().logs.map((l: any) => l.event);
     expect(events).toContain('upload.received');
-    expect(events).toContain('job.started');
-    expect(events).toContain('job.completed');
+    expect(events).toContain('payroll_job.started');
+    expect(events).toContain('payroll_job.completed');
     expect(res.json().correlationId).toMatch(/^job_/);
   });
 });

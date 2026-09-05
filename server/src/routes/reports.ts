@@ -1,14 +1,10 @@
-import type { App } from '../http.js';
-import { requireAuth, scopeEmployeeCode } from '../auth/index.js';
+import type { FastifyInstance } from 'fastify';
+import { requireAuth, restrictToOwnEmployeeCode } from '../auth/index.js';
 import { config } from '../config.js';
 import type { Db } from '../db/index.js';
+import { clamp } from './params.js';
 
-const int = (v: unknown, d: number, min: number, max: number): number => {
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : d;
-};
-
-export function registerReportRoutes(app: App, db: Db): void {
+export function registerReportRoutes(app: FastifyInstance, db: Db): void {
   /**
    * Dashboard payload: the latest completed pay run plus organisation-wide
    * roll-ups that span every completed job.
@@ -87,7 +83,7 @@ export function registerReportRoutes(app: App, db: Db): void {
    */
   app.get('/api/reports/department-history', { preHandler: requireAuth }, async (req, reply) => {
     const q = req.query as Record<string, string>;
-    const periods = int(q.periods, 3, 1, 24);
+    const periods = clamp(Number(q.periods), 3, 1, 24);
     const params: any[] = [req.auth!.orgId, periods];
     let deptFilter = '';
     if (q.department && q.department !== 'all') {
@@ -136,9 +132,7 @@ export function registerReportRoutes(app: App, db: Db): void {
         [orgId],
       ),
       db.query<any>(
-        `SELECT COALESCE(AVG(processing_ms), 0) AS avg_row_processing_ms,
-                COALESCE(SUM(attempts - 1), 0)::int AS retries
-         FROM timesheet_rows WHERE org_id = $1`,
+        `SELECT COALESCE(SUM(retried_rows), 0)::int AS retried_rows FROM jobs WHERE org_id = $1`,
         [orgId],
       ),
       db.query<any>(
@@ -160,9 +154,8 @@ export function registerReportRoutes(app: App, db: Db): void {
         rowsIngested: Number(j.rows_ingested),
       },
       rows: {
-        avgWallClockMsPerRow: Number(Number(j.avg_row_ms).toFixed(3)),
-        avgCpuMsPerRow: Number(Number(rowsQ.rows[0].avg_row_processing_ms).toFixed(3)),
-        retries: Number(rowsQ.rows[0].retries),
+        avgMsPerRow: Number(Number(j.avg_row_ms).toFixed(3)),
+        retriedRows: Number(rowsQ.rows[0].retried_rows),
       },
       logLevels: Object.fromEntries(logsQ.rows.map((r: any) => [r.level, r.count])),
       engine: {
@@ -177,11 +170,11 @@ export function registerReportRoutes(app: App, db: Db): void {
 
   /** Recent system events across the organisation (observability panel). */
   app.get('/api/logs', { preHandler: requireAuth }, async (req, reply) => {
-    if (scopeEmployeeCode(req.auth!)) {
+    if (restrictToOwnEmployeeCode(req.auth!)) {
       return reply.code(403).send({ error: 'forbidden', message: 'Logs are restricted to admin and HR' });
     }
     const q = req.query as Record<string, string>;
-    const limit = int(q.limit, 100, 1, 500);
+    const limit = clamp(Number(q.limit), 100, 1, 500);
     const params: any[] = [req.auth!.orgId];
     let where = 'org_id = $1';
     if (q.level && ['debug', 'info', 'warn', 'error'].includes(q.level)) {

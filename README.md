@@ -1,180 +1,228 @@
-# Employee Timesheet & Payroll Calculator
+# TimeForge — Employee Timesheet & Payroll Calculator
 
-A full-stack system that ingests bulk timesheet files, validates and prices every row
-concurrently, computes payroll aggregates, and presents the result as a usable product
-screen rather than a pile of JSON.
+Bulk timesheet ingestion, concurrent validation, payroll calculation, and a dashboard
+HR can actually work from.
 
-No external APIs. Deterministic output. Runs with **zero infrastructure setup**, and
-scales up to Postgres + Redis + a dedicated worker when you want it to.
+Upload a CSV or JSON of clock-in/clock-out records; TimeForge validates every row,
+splits regular and overtime hours, prices the result, and stores rollups that answer
+questions like *"what did Support cost over the last three pay periods?"* without
+touching raw rows.
 
-```
-┌─────────────┐   upload    ┌──────────────┐   enqueue   ┌───────────────┐
-│  React SPA  │ ──────────► │  Fastify API │ ──────────► │  Job queue    │
-│  (Vite)     │ ◄────────── │  JWT + RBAC  │             │ memory/BullMQ │
-└─────────────┘  WebSocket  └──────────────┘             └───────┬───────┘
-        ▲          progress          │                           │
-        │                            ▼                           ▼
-        │                     ┌─────────────┐          ┌──────────────────┐
-        └─────────────────────│  Postgres   │◄─────────│  Worker pool     │
-              REST reads      │  (rollups)  │  writes  │  N-way concurrent│
-                              └─────────────┘          └──────────────────┘
-```
+Runs with **no infrastructure setup** (Node 20+ and nothing else), and scales to
+Postgres + Redis + a dedicated worker when configured.
 
 ---
 
-## 1. Setup
+## 1. Features
 
-Requires **Node.js 20+**. Nothing else.
+**Payroll processing**
+- CSV and JSON upload with column-name tolerance (`employee_id`, `empid`, `employeeCode`, …)
+- Per-row validation: required fields, real calendar dates, no future dates, clock-out
+  after clock-in, positive hourly rate
+- Cross-row validation: duplicate rows and overlapping shifts for the same employee
+- Configurable daily and weekly overtime thresholds and multiplier — per organisation,
+  overridable per upload
+- Bad rows are flagged and reported, never dropped, and never fail the run
 
-```bash
-npm install
-cp .env.example .env      # optional — every value has a sane default
-npm run seed              # optional — demo org, users and two processed pay runs
-npm run dev               # API on :4000, UI on :5173
-```
+**Reporting**
+- Total payroll cost, cost by department, regular vs overtime hours
+- Average hours per employee, top 5 by overtime, week-over-week trend with % change
+- Overtime as a share of payroll and of hours
+- Standard deviation of shift length, surfaced as an "irregular scheduling" list
+- Annotated CSV (every row + its verdict), payroll CSV, per-employee payslip CSV
 
-Open <http://localhost:5173>.
-
-The seed creates three accounts in the **Northwind Labs** organisation:
-
-| Role | Email | Password | Sees |
-|---|---|---|---|
-| Admin | `admin@demo.io` | `password123` | everything, can upload and change rules |
-| HR | `hr@demo.io` | `password123` | everything, can upload |
-| Employee | `employee@demo.io` | `password123` | their own payslip only |
-
-Or skip the seed and click **Create an organisation** — you become its admin.
-
-Sample files live in [`samples/`](samples/):
-
-- `timesheet_sample.csv` — the seven rows from the brief, including every defect class
-- `timesheet_sample.json` — the same shape as JSON (both formats are accepted)
-- `timesheet_two_weeks.csv` — ~600 rows over two ISO weeks, generated with ~4% defects
-
-Generate a bigger one for load testing:
-
-```bash
-npm run -w server generate -- 10000    # writes samples/timesheet_10k.csv
-```
-
-### Other ways to run it
-
-```bash
-npm test                  # unit + integration tests (embedded Postgres, no services)
-npm run build && npm start   # production build; the API also serves the built UI
-docker compose up --build    # Postgres + Redis + API + dedicated worker → :4000
-```
-
-### Configuration
-
-Everything is environment-driven ([`.env.example`](.env.example) documents each key). The
-two that change the topology:
-
-| Variable | Unset (default) | Set |
-|---|---|---|
-| `DATABASE_URL` | embedded Postgres (PGlite) in `.data/pg` | connects to a real Postgres server |
-| `REDIS_URL` | in-process job queue | BullMQ queue + Redis pub/sub, worker can run separately |
-
-Tuning knobs: `WORKER_CONCURRENCY` (default 8), `ROW_PROCESSING_DELAY_MS` (simulated
-per-row cost, default 4), `ROW_MAX_ATTEMPTS`, `UPLOAD_RATE_LIMIT_PER_MIN`, `MAX_UPLOAD_MB`,
-and the default overtime rules `OT_DAILY_THRESHOLD` / `OT_WEEKLY_THRESHOLD` / `OT_MULTIPLIER`.
+**Product**
+- Email/password auth with three roles: admin, HR, employee
+- Organisation isolation and employee-level scoping enforced in every query
+- Live processing progress over WebSocket, with REST polling fallback
+- Sortable, searchable, paginated payroll table; per-employee day-by-day drill-down
+- Inline rate correction that re-prices and rebuilds aggregates
+- Structured logs with a correlation ID per job, plus an in-app activity log
 
 ---
 
-## 2. Architecture
+## 2. Tech stack
 
-### Repository layout
+| Layer | Choice |
+|---|---|
+| API | Node 22, TypeScript, Fastify 5 |
+| Database | Postgres — a server via `DATABASE_URL`, or embedded [PGlite](https://pglite.dev) with no setup |
+| Queue | In-process by default; BullMQ + Redis via `REDIS_URL` |
+| Frontend | React 18, Vite, Tailwind, Recharts, React Router |
+| Auth | bcrypt password hashing, JWT bearer tokens |
+| Logging | pino (JSON in production) |
+| Tests | Vitest, running against an in-memory Postgres |
+
+---
+
+## 3. Architecture
+
+```
+┌─────────────┐   upload    ┌──────────────┐  enqueue   ┌───────────────┐
+│  React SPA  │ ──────────► │  Fastify API │ ─────────► │  Payroll queue│
+│   (Vite)    │ ◄────────── │  JWT + RBAC  │            │ memory/BullMQ │
+└─────────────┘  WebSocket  └──────────────┘            └───────┬───────┘
+       ▲          progress          │                           │
+       │                            ▼                           ▼
+       │                     ┌─────────────┐          ┌──────────────────┐
+       └─────────────────────│  Postgres   │◄─────────│  Job processor   │
+             REST reads      │  + rollups  │  writes  │  + worker pool   │
+                             └─────────────┘          └──────────────────┘
+```
 
 ```
 server/src
-  app.ts               Fastify app: CORS, multipart, rate limiting, error handling, SPA hosting
-  index.ts / worker.ts API entrypoint / standalone queue worker
-  auth/                bcrypt hashing, JWT issuing/verifying, role guards, tenant scoping
-  db/                  driver abstraction (pg | PGlite) + SQL migrations
-  jobs/                processor.ts (the pipeline) and queue.ts (memory | BullMQ)
-  payroll/             parse → validate → compute → aggregate (pure, testable)
-  lib/                 worker pool, event bus, event log, CSV writer, ids
-  routes/              auth, jobs, employees, reports
-  ws/                  WebSocket fan-out for live job progress
+  app.ts              Fastify wiring: CORS, multipart, rate limiting, errors, SPA hosting
+  index.ts            API entrypoint and graceful shutdown
+  worker.ts           Standalone queue worker (Redis deployments)
+  config.ts           Environment config + production safety checks
+  auth/               Password hashing, JWT, role guards, tenant scoping
+  db/                 Driver (pg | PGlite) and SQL migrations
+  payroll/            The domain: parse -> validate -> calculate -> aggregate, plus CSV export
+  jobs/               Pipeline (processor), queue, worker pool, progress, events, row storage
+  routes/             auth, jobs, exports, employees, reports
+  ws/                 WebSocket fan-out for live progress
 web/src
-  pages/               Login, Signup, Dashboard, Upload, Jobs, JobDetail, Employees,
-                       EmployeeDetail, MyPayslip, Settings
-  components/          layout, UI primitives, charts
-  lib/                 API client, auth context, formatters, live job stream
+  pages/              Login, Signup, Dashboard, Upload, Jobs, JobDetail (+ job/ tabs),
+                      Employees, EmployeeDetail, MyPayslip, Settings
+  components/         Layout, UI primitives, charts
+  lib/                API client, auth context, formatters, shared job stream
 ```
 
-### The processing pipeline
+The payroll domain (`server/src/payroll/`) is pure — no database, no HTTP — so the
+business rules can be read and tested on their own. The `jobs/` modules orchestrate it.
 
-`server/src/jobs/processor.ts` runs six stages and reports a single 0–100 progress number
-that the UI renders as a bar plus a stage checklist.
+---
 
-| Stage | Unit of work | Concurrent? |
+## 4. Database design
+
+```
+organizations ──┬── users             (role: admin | hr | employee, optional employee_code)
+                ├── employees         (unique per organisation)
+                └── jobs ──┬── job_files       (uploaded content; keeps workers stateless)
+                           ├── timesheet_rows  (raw values + verdict + derived pay)
+                           ├── payroll_lines   (one row per employee — the payslip grain)
+                           ├── payroll_weekly  (weekly rollup, company-wide and per department)
+                           └── payroll_reports (materialised metrics document)
+event_log                                       (structured events, correlated per job)
+```
+
+Money is `NUMERIC`, never floating point; hours are `NUMERIC(10,2)`.
+
+Every table carries `org_id`, and every query filters on it — isolation is enforced at
+the query, not by a middleware someone can forget to apply.
+
+Indexes follow the real access patterns:
+
+| Index | Serves |
+|---|---|
+| `payroll_lines (org_id, department)` | department payroll across pay periods |
+| `jobs (org_id, period_end DESC)` | "last N pay periods" |
+| `payroll_lines (job_id, overtime_hours DESC)` | top-overtime list |
+| `timesheet_rows (job_id, status)` | the rows/errors table |
+| `timesheet_rows (org_id, employee_code, work_date)` | employee drill-down |
+
+Migrations are ordered TypeScript modules in `server/src/db/migrations/`, applied at
+startup and tracked in `_migrations`.
+
+---
+
+## 5. Processing flow
+
+`server/src/jobs/processor.ts` runs six stages and reports one 0–100 progress number.
+
+| Stage | Unit of work | Concurrent |
 |---|---|---|
-| `parsing` | whole file | — |
+| `parsing` | the file | — |
 | `validating` | **one row** | ✅ worker pool |
-| `resolving` | one `(employee, date)` group — duplicates, overlaps, daily split | ✅ worker pool |
-| `overtime` | one `(employee, ISO week)` group — weekly threshold, gross pay | ✅ worker pool |
+| `resolving` | one `(employee, date)` — duplicates, overlaps, daily split | ✅ worker pool |
+| `overtime` | one `(employee, ISO week)` — weekly threshold, then pricing | ✅ worker pool |
 | `persisting` | batches of 250 rows | — |
 | `aggregating` | SQL rollups + metrics document | — |
 
-Measured on the 9,538-row sample with the default 4ms simulated per-row cost
-(`npm run -w server generate -- 10000`, then upload):
+Failure handling at each boundary:
 
-| `WORKER_CONCURRENCY` | Validation phase | Throughput |
+- A row that throws is retried (`ROW_MAX_ATTEMPTS`) then recorded as `PROCESSING_ERROR`
+  — surfaced in the report, never silently dropped
+- A job that throws is marked `failed`, with the message stored on the job row and
+  logged against its correlation ID
+- An unreadable file is rejected at upload with a 400, before a job row is created
+- `SIGTERM` drains in-flight jobs before closing the database (15s, then aborts)
+
+---
+
+## 6. Concurrency design
+
+Validation is genuinely per-row, so it fans out across a worker pool. Duplicate
+detection, overlap detection and the overtime split are **set-based** — they depend on
+the employee's other rows.
+
+Rather than share mutable state between workers (which makes results depend on whichever
+worker finished first), rows are grouped and each **group** becomes one task. Groups are
+independent, so they run in parallel; within a group rows are always ordered by row
+number. Re-running the same file produces identical output.
+
+`runWorkerPool` uses a fixed number of workers pulling from a shared cursor, so a slow
+task never blocks the ones behind it — unlike chunked `Promise.all`, where each batch
+runs at the speed of its slowest member. Failures are collected, not thrown.
+
+Measured on 9,538 rows with the default 4ms simulated per-row cost:
+
+| `WORKER_CONCURRENCY` | Validation stage | Throughput |
 |---|---|---|
-| 1 (sequential) | 47.1s | 202 rows/s |
-| 4 | 11.6s | 821 rows/s |
-| **8 (default)** | **5.8s** | **1,655 rows/s** |
-| 16 | 2.8s | 3,371 rows/s |
-| 32 | 1.4s | 6,925 rows/s |
+| 1 (sequential) | 43.1s | 221 rows/s |
+| 4 | 10.7s | 888 rows/s |
+| **8 (default)** | **5.5s** | **1,749 rows/s** |
+| 16 | 2.7s | 3,580 rows/s |
+| 32 | 1.4s | 6,911 rows/s |
 
-End to end — upload, validate, resolve, price, persist and aggregate 9,538 rows
-through the HTTP API — takes **6.3s**, with the progress bar updating throughout.
+End to end through HTTP — upload, validate, resolve, price, persist, aggregate —
+9,538 rows complete in **~6s**, with progress updating throughout.
 
-Splitting the work this way is what makes the concurrency both real and **deterministic**.
-Field-level validation is genuinely per-row, so it fans out. But duplicate detection,
-overlap detection and the overtime split are *set-based* — they depend on the other rows
-for the same employee. Rather than sharing mutable state between workers (which makes the
-result depend on completion order), rows are grouped first and each **group** becomes one
-task. Groups are independent, so they run in parallel, and within a group rows are always
-processed in `row_number` order. Re-running the same file always produces byte-identical
-output.
+---
+
+## 7. Payroll calculation rules
+
+```
+hours worked = clock_out − clock_in                        (2 decimal places)
+
+regular / overtime hours
+  1. daily rule   hours past dailyThreshold in one day are overtime, filled
+                  across that day's shifts in clock-in order
+  2. weekly rule  if the week's regular hours exceed weeklyThreshold, the excess
+                  moves to overtime starting from the most recent shift
+
+regular pay  = round(regular_hours  × rate)                (in whole cents)
+overtime pay = round(overtime_hours × rate × multiplier)   (in whole cents)
+gross pay    = regular pay + overtime pay
+```
+
+Pay is computed in integer cents and divided once. Rounding each earning line and
+summing integers is what keeps a payslip's regular + overtime equal to its gross;
+summing rounded floating-point values does not. Aggregation only ever *sums* these
+columns, so the overtime multiplier appears in exactly one place —
+`server/src/payroll/calculate.ts`.
+
+Setting the daily threshold to 24 gives a weekly-only policy; a high weekly threshold
+gives a daily-only policy.
 
 ### Validation rules
 
 | Code | Meaning |
 |---|---|
 | `MISSING_FIELD` | one of the seven required fields is blank |
-| `INVALID_DATE` | not a real calendar date (`2025-02-30` is rejected) |
+| `INVALID_DATE` | not a real calendar date; only `YYYY-MM-DD` is accepted |
 | `FUTURE_DATE` | dated after today |
 | `INVALID_TIME` | unparseable `clock_in` / `clock_out` |
-| `CLOCK_OUT_NOT_AFTER_CLOCK_IN` | zero-length or reversed shift |
+| `CLOCK_OUT_NOT_AFTER_CLOCK_IN` | reversed or zero-length shift |
 | `INVALID_RATE` / `NON_POSITIVE_RATE` | not a number, or ≤ 0 |
-| `DUPLICATE_ROW` | same `employee + date + clock_in` as an earlier row |
-| `OVERLAPPING_SHIFT` | overlaps an already-accepted shift that day |
-| `IMPLAUSIBLE_SHIFT_LENGTH` | optional guard, off unless `maxShiftHours` is supplied |
-| `PROCESSING_ERROR` | the row failed every retry — surfaced, never silently dropped |
+| `DUPLICATE_ROW` | same employee + date + clock_in as an earlier row |
+| `OVERLAPPING_SHIFT` | overlaps a shift already accepted that day |
+| `PROCESSING_ERROR` | the row failed every retry |
 
-A row is `duplicate`, `invalid`, or `valid`. Only `valid` rows contribute to payroll;
-everything else is kept, annotated and downloadable. **A bad row never fails the job.**
+A row ends up `valid`, `invalid`, or `duplicate`. Only `valid` rows are paid.
 
-### Payroll math
-
-```
-hours_worked   = clock_out − clock_in                       (hours, 2dp)
-regular/overtime:
-  1. daily rule  — hours past dailyThreshold in one day are overtime,
-                   filled across the day's shifts in clock-in order
-  2. weekly rule — if weekly regular hours exceed weeklyThreshold, the excess is
-                   reclassified as overtime starting from the most recent shift
-gross_pay      = regular_hours × rate + overtime_hours × rate × multiplier
-```
-
-Both thresholds and the multiplier are configurable per organisation *and* overridable
-per upload. Setting the daily threshold to 24 gives a weekly-only policy; setting the
-weekly threshold high gives a daily-only policy.
-
-The brief's sample file produces exactly:
+The sample file from the brief (`samples/timesheet_sample.csv`) produces:
 
 | Row | Employee | Verdict | Hours | Regular | Overtime | Gross |
 |---|---|---|---|---|---|---|
@@ -186,178 +234,225 @@ The brief's sample file produces exactly:
 | 7 | EMP-105 Priya | invalid — `NON_POSITIVE_RATE` | — | — | — | 0 |
 | 8 | EMP-106 Arjun | invalid — `FUTURE_DATE` | — | — | — | 0 |
 
-Total payroll **$649.50**, 3 valid / 3 invalid / 1 duplicate. This is asserted in
-`server/tests/validate.test.ts` and `server/tests/api.test.ts`.
+Total **$649.50**, 3 valid / 3 invalid / 1 duplicate — asserted in the test suite.
 
-### Aggregate metrics
+---
 
-Computed in SQL from the rollup tables and stored as one JSONB document per job:
+## 8. API overview
 
-total payroll cost · cost by department · regular vs overtime hours (company-wide and per
-department) · average hours per employee · top 5 by overtime · week-over-week payroll trend
-with % change · overtime cost as a % of payroll · standard deviation of shift length and of
-per-employee hours (surfaced in the UI as an "irregular scheduling" table).
-
-### Database design
-
-```
-organizations ──┬── users            (role: admin | hr | employee, optional employee_code)
-                ├── employees        (unique per org)
-                └── jobs ──┬── job_files       (uploaded content; keeps workers stateless)
-                           ├── timesheet_rows  (raw + verdict + derived values)
-                           ├── payroll_lines   (one row per employee per job — the payslip grain)
-                           ├── payroll_weekly  (weekly rollup, company + per department)
-                           └── payroll_reports (materialised metrics document)
-event_log                                       (structured events, correlated by job)
-```
-
-Every table carries `org_id` and every query filters on it — tenant isolation is enforced
-at the data layer, not just the route layer. Indexes target the actual access patterns:
-`(org_id, department)` and `(org_id, period_end DESC)` make *"this department's payroll for
-the last 3 pay periods"* a rollup-only query that never touches raw rows;
-`(job_id, status)`, `(org_id, employee_code, work_date)` and `(job_id, overtime_hours DESC)`
-back the payroll table, the employee drill-down and the top-overtime list.
-
-### API surface
+All `/api` routes except signup and login require `Authorization: Bearer <token>`.
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/auth/signup` · `/api/auth/login` · `GET /api/auth/me` | JWT, bcrypt |
+| `POST` | `/api/auth/signup` · `/api/auth/login` · `GET /api/auth/me` | |
 | `GET/POST` | `/api/auth/users` | list team / create account (admin) |
-| `PUT` | `/api/organization/rules` | configurable overtime policy |
-| `POST` | `/api/jobs/upload` | multipart CSV/JSON, rate-limited per user |
-| `POST` | `/api/jobs/:id/process` · `/api/jobs/:id/reaggregate` | manual trigger / re-run |
-| `PATCH` | `/api/jobs/:id/employees/:code/rate` | correct a rate, then rebuild payroll |
-| `GET` | `/api/jobs` · `/api/jobs/:id` · `/:id/rows` · `/:id/payroll` · `/:id/metrics` · `/:id/logs` | paged, sortable, searchable |
+| `PUT` | `/api/organization/rules` | overtime policy (admin) |
+| `POST` | `/api/jobs/upload` | multipart CSV/JSON, rate limited per token |
+| `POST` | `/api/jobs/:id/process` · `/api/jobs/:id/reaggregate` | trigger / re-run |
+| `PATCH` | `/api/jobs/:id/employees/:code/rate` | correct a rate, rebuild payroll |
+| `GET` | `/api/jobs` · `/:id` · `/:id/rows` · `/:id/payroll` · `/:id/metrics` · `/:id/logs` | paged, sortable, searchable |
 | `GET` | `/api/jobs/:id/export/annotated.csv` · `/export/payroll.csv` | downloads |
-| `GET` | `/api/employees` · `/api/employees/:code/timesheet` · `/:code/payslip.csv` | day-by-day + payslip |
+| `GET` | `/api/employees` · `/api/departments` · `/api/employees/:code/timesheet` · `/:code/payslip.csv` | |
 | `GET` | `/api/reports/overview` · `/api/reports/department-history` | dashboard, multi-period |
 | `GET` | `/api/metrics/ops` · `/api/logs` · `/healthz` | observability |
-| `WS` | `/ws?token=…&jobId=…` | live progress, org-scoped |
+| `WS` | `/ws?token=…` | live progress, scoped to the caller's organisation |
 
-### Observability
-
-Structured JSON logs (pino) with levels, redacted secrets, and a **correlation ID per job**
-(`job_a1b2c3d4e5`) that ties the upload request, every worker phase and the aggregation
-together. The same events are persisted to `event_log` so the UI can show a per-job trace
-without a log stack. `/api/metrics/ops` reports job failure rate, average and max job
-duration, average wall-clock and CPU time per row, and row retry counts — all rendered on
-the Settings screen.
+Errors return `{ error, message, requestId }`. 5xx responses carry a generic message;
+the detail and stack stay in the logs, keyed by `requestId`.
 
 ---
 
-## 3. Design decisions and tradeoffs
+## 9. Local setup
 
-**Embedded Postgres by default, real Postgres when configured.** The brief asks for
-Postgres; a reviewer needs the thing to start. Both are served by one driver interface
-(`server/src/db/index.ts`): `DATABASE_URL` unset boots [PGlite](https://pglite.dev)
-(actual Postgres compiled to WASM, same SQL, same `stddev_samp`, same `jsonb`), set points
-at a server. One schema, one set of migrations, no dialect branching. *Tradeoff:* PGlite is
-single-connection and file-backed, so it is a development and test convenience, not a
-production database — which is exactly why `docker compose` wires up the real one.
-
-**An async worker pool, not `worker_threads`.** The per-row cost the brief asks us to
-simulate is a *wait*, and the real per-row work (parsing, comparisons, arithmetic) is
-microseconds. A pool of N async workers pulling from a shared cursor gives real
-parallelism for that shape of work with none of the structured-clone cost of moving
-100k rows across thread boundaries. The pool is a swappable module
-(`server/src/lib/pool.ts`) — if row processing ever became CPU-bound, only its internals
-change. It also beats chunked `Promise.all` batching, where every batch runs at the speed
-of its slowest member.
-
-**Grouped phases for deterministic set-based rules.** See "the processing pipeline" above.
-The alternative — a shared `Map` of seen keys mutated by concurrent workers — is faster to
-write and produces results that depend on scheduling. Payroll cannot be non-deterministic.
-
-**Aggregation in SQL, not JavaScript.** For a 10k+ row file the database is both faster and
-bounded in memory, and the rollup tables it writes then serve cross-job queries directly.
-*Tradeoff:* the metric definitions live in SQL rather than in the unit-tested pure
-functions — mitigated by asserting the aggregate output end-to-end in `api.test.ts`.
-
-**Two queue drivers behind one interface.** In-process by default (zero setup, fine for a
-single node); BullMQ + Redis when `REDIS_URL` is set, with a separate `worker` container
-and Redis pub/sub carrying progress events back to whichever API process holds the
-WebSocket. *Tradeoff:* the in-process queue loses queued jobs on restart — acceptable,
-because the uploaded file is stored in the database and any job can be re-triggered.
-
-**Uploaded files in the database, not on disk.** `job_files` holds the raw content, so the
-API and worker containers stay stateless with no shared volume. *Tradeoff:* not the right
-call past ~100MB, where object storage plus a streaming parser is correct. The
-`MAX_UPLOAD_MB` cap keeps us well inside the sensible range.
-
-**Rate correction re-prices rather than re-parses.** Hours don't depend on the rate, so
-`PATCH …/rate` updates the rate, recomputes `gross_pay` in SQL and rebuilds the aggregates
-— fast and safe. Anything that could change hours goes through **Reprocess file**, which
-re-runs the whole pipeline from the stored original.
-
-**WebSockets with a polling fallback.** Live progress is a WebSocket; if the socket can't
-be established (a proxy that drops upgrades), the same hook transparently polls the REST
-endpoint and the header shows "Polling" instead of "Live". The UI never depends on the
-socket being available.
-
-**Tenant isolation in the query, not a middleware.** Every statement filters on `org_id`,
-and employee-role users are additionally scoped to their own `employee_code`. It's more
-repetition than a global filter, but there is no code path where forgetting a decorator
-leaks another organisation's payroll. Asserted directly in `api.test.ts`.
-
-**Charts follow one colour system.** Regular hours/pay are always the same blue and
-overtime always the same orange — the colour follows the measure, never its position in a
-filtered list. The categorical pair was checked for colour-vision separation rather than
-picked by eye, every multi-series chart carries a legend, and there is no dual-axis chart
-anywhere.
-
-### What I would do next
-
-- Stream the parse for files past ~100MB instead of holding rows in memory
-- Pay-period entities as first-class rows (currently derived from each job's date range)
-- `COPY`-based bulk insert on real Postgres — the batched `INSERT` is the persist-stage bottleneck
-- Per-row optimistic retry against a dead-letter table rather than an in-memory retry
-- A real PDF payslip renderer; today the payslip screen is print-optimised (Save as PDF) plus a CSV export
-
----
-
-## 4. Testing
+Requires **Node.js 20+**.
 
 ```bash
-npm test
+npm install
+cp .env.example .env      # optional — every value has a working default
+npm run seed              # optional — demo organisation, users, two processed pay runs
+npm run dev               # API on :4000, UI on :5173
 ```
 
-- `validate.test.ts` — every rule, and the brief's sample file asserted row by row
-- `compute.test.ts` — daily and weekly overtime, overlaps, duplicates, configurable rules, week boundaries
-- `pool.test.ts` — proves the pool is actually concurrent, respects its limit, retries, and isolates permanent failures
-- `api.test.ts` — signup/login, tenant isolation, employee-role restrictions, upload → process → metrics → export end to end, and a 2,000-row run asserted against hand-computed totals
+Open <http://localhost:5173>.
 
-The integration tests run against an in-memory Postgres, so CI needs no services.
+Seeded accounts (organisation *Northwind Labs*):
+
+| Role | Email | Password | Sees |
+|---|---|---|---|
+| Admin | `admin@demo.io` | `password123` | everything; can upload and change rules |
+| HR | `hr@demo.io` | `password123` | everything; can upload |
+| Employee | `employee@demo.io` | `password123` | their own payslip only |
+
+Or click **Create an organisation** and become its admin.
+
+Sample files in [`samples/`](samples/):
+
+- `timesheet_sample.csv` — the seven rows from the brief, one of each defect
+- `timesheet_sample.json` — the same data as JSON
+- `timesheet_two_weeks.csv` — ~570 rows over two ISO weeks with ~4% defects
+
+```bash
+npm run -w server generate -- 10000   # writes samples/timesheet_10k.csv for load testing
+```
 
 ---
 
-## 5. How AI tools were used
+## 10. Environment variables
 
-This project was built with **Claude Code** (Claude Opus) driving the implementation, used
-deliberately rather than as an autocomplete:
+[`.env.example`](.env.example) documents every variable. The two that change the
+topology:
 
-- **Design first, in prose.** Before any code, the pipeline was specified — where
-  concurrency is real versus theatre, and which rules are per-row versus set-based. That
-  conversation is what produced the three-phase grouped design instead of the obvious
-  shared-mutable-`Map` approach, which would have made duplicate flagging depend on worker
-  scheduling.
-- **Generating the wide, boring surface fast.** Migrations, route handlers, formatters and
-  the React pages are the bulk of the line count and the least interesting part of the
-  problem. Delegating them freed the time actually spent on the pipeline, the indexes and
-  the failure modes.
-- **Tests as the specification.** The expected verdicts and payroll figures for the brief's
-  seven sample rows were written as assertions *before* the compute engine, so the
-  implementation had a fixed target. The 2,000-row test totals are hand-derivable
-  (`500 employees × 4 days × (8×20 + 1×20×1.5)`) rather than snapshots of whatever the code
-  happened to produce.
-- **Reviewing its own output.** Several defects were caught by re-reading generated code
-  critically: the payroll table not refetching after a rate correction, overtime leaking
-  across ISO week boundaries, and an empty-batch `INSERT` that would have produced invalid
-  SQL for a zero-row file.
-- **Not delegated:** the schema and index choices, the decision to keep aggregation in SQL,
-  the queue/database abstraction boundaries, and the chart colour system — these are the
-  judgement calls the rest of the code hangs off.
+| Variable | Unset (default) | Set |
+|---|---|---|
+| `DATABASE_URL` | embedded Postgres in `.data/pg` | connects to a Postgres server |
+| `REDIS_URL` | in-process queue | BullMQ + Redis, worker can run separately |
 
-The honest summary: AI made the breadth of this build feasible in the time available. The
-parts worth reviewing — determinism under concurrency, tenant isolation, index design, and
-what happens when a row fails — were decided by hand and then verified with tests.
+Commonly tuned: `WORKER_CONCURRENCY` (8), `MAX_PARALLEL_JOBS` (2),
+`ROW_PROCESSING_DELAY_MS` (4), `ROW_MAX_ATTEMPTS` (3), `MAX_UPLOAD_MB` (25),
+`UPLOAD_RATE_LIMIT_PER_MIN` (10), and the default overtime rules
+`OT_DAILY_THRESHOLD` / `OT_WEEKLY_THRESHOLD` / `OT_MULTIPLIER`.
+
+**In production** the process refuses to start unless `JWT_SECRET` is changed from the
+default and at least 32 characters, and `CORS_ORIGINS` lists the allowed origins.
+
+---
+
+## 11. Running tests
+
+```bash
+npm test          # 70 tests
+npm run lint      # ESLint across both workspaces
+npm run typecheck # tsc --noEmit, server + web
+```
+
+| Suite | Covers |
+|---|---|
+| `validate.test.ts` | every field rule, and the brief's sample file row by row |
+| `calculate.test.ts` | daily/weekly overtime, overlaps, duplicates, configurable rules, week boundaries, pay precision to the cent |
+| `aggregate.test.ts` | department totals, weekly trend and % change, top overtime, standard deviation, overtime %, data-quality counts, idempotent re-runs |
+| `pool.test.ts` | real concurrency, the concurrency limit, retries, isolated permanent failures |
+| `api.test.ts` | auth, cross-organisation isolation, employee-role restrictions, upload → process → metrics → export, and a 2,000-row run against hand-computed totals |
+
+Tests run against an in-memory Postgres, so CI needs no services.
+
+---
+
+## 12. Docker
+
+```bash
+JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
+# → http://localhost:4000
+```
+
+Brings up Postgres, Redis, the API (which also serves the built UI) and a dedicated
+worker consuming from the BullMQ queue. The API container enqueues only
+(`INLINE_WORKER=false`), so payroll runs never compete with request handling.
+
+> The Docker build is written but was not executed here — no Docker daemon was
+> available in this environment. Everything else in this README was run.
+
+---
+
+## 13. Design decisions and tradeoffs
+
+**Embedded Postgres by default, a real server when configured.** One driver interface
+(`server/src/db/index.ts`) covers both: unset `DATABASE_URL` boots PGlite (Postgres
+compiled to WebAssembly — same SQL, same `STDDEV_SAMP`, same `jsonb`), set points at a
+server. One schema, one set of migrations, no dialect branching. PGlite is
+single-connection and file-backed, so it is a development and test convenience;
+`docker compose` runs the real thing.
+
+**Pay computed in integer cents.** Rounding each earning line and summing integers is
+what makes a payslip foot. Aggregation only sums the stored `regular_pay` and
+`overtime_pay` columns, so the overtime multiplier exists in exactly one place — before
+this, aggregation re-derived overtime pay in SQL and a payslip's parts could disagree
+with its total by a cent.
+
+**An async worker pool, not `worker_threads`.** The per-row cost being simulated is a
+wait, and the real per-row work is microseconds of parsing and arithmetic. N async
+workers give real parallelism for that shape without the structured-clone cost of moving
+10,000 rows across thread boundaries. The pool is one module; if row processing became
+CPU-bound, only its internals change.
+
+**Aggregation in SQL.** For a 10k+ row file the database is faster and bounded in
+memory, and the rollup tables it writes then serve cross-job queries directly. The
+tradeoff is that metric definitions live in SQL rather than in the unit-tested pure
+functions — covered by asserting aggregate output end to end in `aggregate.test.ts`.
+
+**Two queue drivers behind one interface.** In-process by default (zero setup, fine for
+one node); BullMQ + Redis when configured, with Redis pub/sub carrying progress back to
+whichever API process holds the WebSocket. The in-process queue loses *queued* jobs on
+restart — acceptable because the uploaded file is stored in the database and any job can
+be re-triggered. In-flight jobs are drained on `SIGTERM`.
+
+**Uploaded files in the database.** `job_files` holds the raw content so the API and
+worker containers stay stateless with no shared volume. Wrong past ~100MB, where object
+storage and a streaming parser are correct; `MAX_UPLOAD_MB` keeps us inside the sensible
+range.
+
+**Rate correction re-prices rather than re-parses.** Hours do not depend on the rate, so
+`PATCH …/rate` updates the rate, recomputes pay in SQL and rebuilds aggregates. Anything
+that could change hours goes through **Reprocess file**, which re-runs the pipeline from
+the stored original.
+
+**Tenant isolation in the query.** Every statement filters on `org_id`, and
+employee-role users are additionally scoped to their own `employee_code` by
+`restrictToOwnEmployeeCode`, which callers put in the `WHERE` clause. More repetition
+than a global filter, but there is no path where forgetting a decorator leaks another
+organisation's payroll.
+
+**Bearer tokens in the header only.** The WebSocket handshake reads `?token=` because
+browsers cannot set headers there; HTTP routes do not, so tokens stay out of access
+logs, proxy logs and browser history.
+
+**A simulated per-row delay ships in the code.** `ROW_PROCESSING_DELAY_MS` stands in for
+the rule lookups a real payroll engine performs, and exists so the concurrency is
+measurable rather than theoretical. Set it to `0` for a real deployment.
+
+### Known limitations
+
+- Shifts that cross midnight are rejected rather than split across two days
+- The parser holds all rows in memory; past ~100MB it should stream
+- Persisting uses batched `INSERT`; on a real Postgres, `COPY` would be faster
+- Pay periods are derived from each job's date range rather than being first-class
+- The payslip screen is print-optimised (Save as PDF) plus CSV; there is no PDF renderer
+
+---
+
+## 14. AI usage disclosure
+
+AI tooling (Claude) was used throughout this project, and the result was reviewed,
+tested and corrected by hand rather than accepted as written.
+
+Where it was used:
+
+- **Architecture discussion** — talking through where concurrency is real versus
+  cosmetic, and which validation rules are per-row versus set-based. That is what
+  produced the grouped-phase design instead of a shared mutable map, which would have
+  made duplicate flagging depend on worker scheduling.
+- **Scaffolding** — migrations, route handlers, React pages and formatters: the bulk of
+  the line count and the least interesting part of the problem.
+- **Test suggestions** — expected verdicts and payroll figures for the sample file were
+  written as assertions before the calculator existed, so the implementation had a fixed
+  target. Totals in the larger tests are hand-derivable rather than snapshots of
+  whatever the code happened to produce.
+- **Code review** — a structured pass over the finished implementation, which surfaced
+  several of the defects fixed below.
+- **Documentation** — drafting this README.
+
+What was decided and verified by hand: the schema and index choices, keeping aggregation
+in SQL, the queue and database abstraction boundaries, the money representation, and the
+security model.
+
+Defects found during review and fixed — several of them in AI-generated code:
+
+- a payslip whose regular + overtime did not always equal its gross
+- the overtime multiplier duplicated in four SQL statements and the calculator
+- an N+1 insert in the employee directory sync (one round trip per employee)
+- bearer tokens accepted from the query string on every HTTP route
+- an ops metrics query that scanned every row ever ingested by the organisation
+- a shutdown path that closed the database under a running job
+- three WebSocket connections open per page instead of one
+
+Every claim in this README was executed against the running application; the single
+exception is called out in the Docker section.

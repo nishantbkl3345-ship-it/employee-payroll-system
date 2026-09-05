@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
+import { PageHeading } from '../components/PageHeading';
 import { Card, ErrorNote, Spinner, StatTile } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { dateTime, duration, num, pct } from '../lib/format';
-import { PageHeading } from './Dashboard';
 
 export default function Settings() {
   const { organization, user, refresh } = useAuth();
@@ -188,8 +188,8 @@ export default function Settings() {
           />
           <StatTile
             label="Avg row processing"
-            value={`${num(ops.rows.avgWallClockMsPerRow)}ms`}
-            hint={`${num(ops.rows.avgCpuMsPerRow)}ms CPU · ${num(ops.rows.retries)} retries`}
+            value={`${num(ops.rows.avgMsPerRow)}ms`}
+            hint={`${num(ops.rows.retriedRows)} rows retried`}
           />
           <StatTile label="Avg job duration" value={duration(ops.jobs.avgDurationMs)} hint={`max ${duration(ops.jobs.maxDurationMs)}`} />
         </div>

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { PageHeading } from '../components/PageHeading';
 import { Card, EmptyState, ErrorNote, Spinner } from '../components/ui';
 import { api } from '../lib/api';
 import { day, money, num } from '../lib/format';
-import { PageHeading } from './Dashboard';
 
 interface Employee {
   employee_code: string;

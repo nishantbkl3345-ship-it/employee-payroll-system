@@ -2,7 +2,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -20,7 +20,7 @@ const SERIES = {
   regular: '#2a78d6',
   overtime: '#eb6834',
   surface: '#ffffff',
-  grid: '#ececE7',
+  grid: '#ecece7',
   axis: '#84837c',
 };
 
@@ -95,17 +95,26 @@ export function DepartmentCostChart({
               ) : null
             }
           />
-          <Bar dataKey="grossPay" radius={[0, 4, 4, 0]} barSize={18} isAnimationActive={false}>
-            {rows.map((row) => (
-              <Cell key={row.department} fill={SERIES.regular} />
-            ))}
+          <Bar
+            dataKey="grossPay"
+            fill={SERIES.regular}
+            radius={[0, 4, 4, 0]}
+            barSize={18}
+            isAnimationActive={false}
+          >
+            <LabelList
+              dataKey="grossPay"
+              position="right"
+              formatter={(value: number) => moneyCompact(value)}
+              style={{ fill: SERIES.axis, fontSize: 11 }}
+            />
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-      {/* Direct labels: the figures stay legible without hovering. */}
+      {/* Screen-reader equivalent of the bars, which convey value by length. */}
       <ul className="sr-only">
-        {rows.map((r) => (
-          <li key={r.department}>{`${r.department}: ${money(r.grossPay)}`}</li>
+        {rows.map((row) => (
+          <li key={row.department}>{`${row.department}: ${money(row.grossPay)}`}</li>
         ))}
       </ul>
     </div>

@@ -1,11 +1,10 @@
-import Fastify from 'fastify';
-import type { App } from './http.js';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
+import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { config, ROOT } from './config.js';
 import { getDb, type Db } from './db/index.js';
 import { migrate } from './db/migrations/index.js';
@@ -15,48 +14,49 @@ import { registerJobRoutes } from './routes/jobs.js';
 import { registerEmployeeRoutes } from './routes/employees.js';
 import { registerReportRoutes } from './routes/reports.js';
 
-export interface BuildOptions {
+export interface BuildAppOptions {
   db?: Db;
   /** Skip migrations when the caller has already prepared the schema. */
   migrated?: boolean;
 }
 
-export async function buildApp(opts: BuildOptions = {}): Promise<{ app: App; db: Db }> {
-  const db = opts.db ?? (await getDb());
-  if (!opts.migrated) await migrate(db);
+export async function buildApp(options: BuildAppOptions = {}): Promise<{ app: FastifyInstance; db: Db }> {
+  const db = options.db ?? (await getDb());
+  if (!options.migrated) await migrate(db);
 
   const app = Fastify({
-    loggerInstance: logger,
+    // pino's concrete Logger narrows Fastify's generics, which then makes the
+    // instance incompatible with plain FastifyInstance in the route modules.
+    loggerInstance: logger as FastifyBaseLogger,
     trustProxy: true,
     bodyLimit: config.maxUploadMb * 1024 * 1024,
-    // Every request carries an id; job routes additionally carry a correlation id.
     genReqId: (req) => (req.headers['x-request-id'] as string) ?? randomUUID(),
   });
 
   await app.register(cors, {
-    origin: true,
-    credentials: true,
+    // Auth is a bearer token, not a cookie, so credentialed CORS is unnecessary.
+    origin: config.corsOrigins.length ? config.corsOrigins : true,
     exposedHeaders: ['content-disposition'],
   });
   await app.register(multipart, {
     limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 1 },
   });
-  await app.register(rateLimit, {
-    global: false,
-    max: 300,
-    timeWindow: '1 minute',
-  });
+  await app.register(rateLimit, { global: false, max: 300, timeWindow: '1 minute' });
 
-  app.setErrorHandler((error: any, req: any, reply: any) => {
+  app.setErrorHandler((error: FastifyError, req, reply) => {
     const status = error.statusCode ?? 500;
     if (status >= 500) {
       req.log.error({ err: error, reqId: req.id }, 'unhandled request error');
-    } else {
-      req.log.warn({ err: error.message, reqId: req.id, status }, 'request rejected');
+      return reply.code(500).send({
+        error: 'internal_error',
+        message: 'Something went wrong on our side',
+        requestId: req.id,
+      });
     }
-    reply.code(status).send({
-      error: status >= 500 ? 'internal_error' : (error.code ?? 'request_error'),
-      message: status >= 500 ? 'Something went wrong on our side' : error.message,
+    req.log.warn({ reqId: req.id, status, err: error.message }, 'request rejected');
+    return reply.code(status).send({
+      error: error.code ?? 'request_error',
+      message: error.message,
       requestId: req.id,
     });
   });
@@ -73,20 +73,23 @@ export async function buildApp(opts: BuildOptions = {}): Promise<{ app: App; db:
   registerEmployeeRoutes(app, db);
   registerReportRoutes(app, db);
 
-  // In a container the API also serves the built single-page app, so the whole
-  // product is one process. In development Vite serves it and proxies here.
-  const webDist = process.env.WEB_DIST ?? path.join(ROOT, 'web', 'dist');
-  if (process.env.SERVE_WEB !== 'false' && existsSync(path.join(webDist, 'index.html'))) {
-    const staticPlugin = (await import('@fastify/static')).default;
-    await app.register(staticPlugin, { root: webDist, wildcard: false });
-    app.setNotFoundHandler((req: any, reply: any) => {
-      if (req.url.startsWith('/api') || req.url.startsWith('/ws') || req.url.startsWith('/healthz')) {
-        return reply.code(404).send({ error: 'not_found', message: `No route for ${req.method} ${req.url}` });
-      }
-      return reply.sendFile('index.html');
-    });
-    logger.info({ webDist }, 'serving the built web app');
-  }
-
+  await serveWebApp(app);
   return { app, db };
+}
+
+/** In a container the API also serves the built SPA; in development Vite does. */
+async function serveWebApp(app: FastifyInstance): Promise<void> {
+  const webDist = process.env.WEB_DIST ?? path.join(ROOT, 'web', 'dist');
+  if (process.env.SERVE_WEB === 'false' || !existsSync(path.join(webDist, 'index.html'))) return;
+
+  const fastifyStatic = (await import('@fastify/static')).default;
+  await app.register(fastifyStatic, { root: webDist, wildcard: false });
+
+  app.setNotFoundHandler((req, reply) => {
+    if (req.url.startsWith('/api') || req.url.startsWith('/ws') || req.url.startsWith('/healthz')) {
+      return reply.code(404).send({ error: 'not_found', message: `No route for ${req.method} ${req.url}` });
+    }
+    return reply.sendFile('index.html');
+  });
+  logger.info({ webDist }, 'serving the built web app');
 }

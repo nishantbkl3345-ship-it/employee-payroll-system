@@ -1,4 +1,4 @@
-import type { App } from '../http.js';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   hashPassword,
@@ -11,7 +11,7 @@ import {
 } from '../auth/index.js';
 import { config } from '../config.js';
 import type { Db } from '../db/index.js';
-import { recordEvent } from '../lib/eventlog.js';
+import { recordJobEvent } from '../jobs/events.js';
 
 const slugify = (s: string): string =>
   s
@@ -65,7 +65,7 @@ const toAuthUser = (row: UserRow): AuthUser => ({
   employeeCode: row.employee_code,
 });
 
-export function registerAuthRoutes(app: App, db: Db): void {
+export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
   app.post('/api/auth/signup', async (req, reply) => {
     const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -110,7 +110,7 @@ export function registerAuthRoutes(app: App, db: Db): void {
     });
 
     const user = toAuthUser(result.user);
-    await recordEvent(db, {
+    await recordJobEvent(db, {
       orgId: user.orgId,
       event: 'auth.signup',
       message: `New organisation "${organizationName}" created by ${email}`,
@@ -194,7 +194,7 @@ export function registerAuthRoutes(app: App, db: Db): void {
         parsed.data.employeeCode || null,
       ],
     );
-    await recordEvent(db, {
+    await recordJobEvent(db, {
       orgId: req.auth!.orgId,
       event: 'auth.user_created',
       message: `${req.auth!.email} created ${parsed.data.role} account ${email}`,
@@ -217,7 +217,7 @@ export function registerAuthRoutes(app: App, db: Db): void {
        RETURNING id, name, slug, ot_daily_threshold, ot_weekly_threshold, ot_multiplier`,
       [req.auth!.orgId, dailyThreshold, weeklyThreshold, multiplier],
     );
-    await recordEvent(db, {
+    await recordJobEvent(db, {
       orgId: req.auth!.orgId,
       event: 'organization.rules_updated',
       message: `Overtime rules updated by ${req.auth!.email}`,

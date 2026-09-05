@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, getToken } from './api';
 
 export interface JobEvent {
@@ -15,136 +15,153 @@ export interface JobEvent {
   at?: string;
 }
 
+const RUNNING = new Set(['pending', 'queued', 'processing']);
+const RECONNECT_MS = 4000;
+const POLL_MS = 1500;
+
+type Listener = (event: JobEvent) => void;
+
+/**
+ * One WebSocket for the whole app.
+ *
+ * Several screens follow job progress at once (the header, the jobs list, the
+ * job page). Opening a socket per hook meant three connections per page, so
+ * the connection is shared and hooks subscribe to it.
+ */
+const connection = {
+  socket: null as WebSocket | null,
+  listeners: new Set<Listener>(),
+  reconnectTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+  open: false,
+
+  subscribe(listener: Listener): () => void {
+    this.listeners.add(listener);
+    this.connect();
+    return () => {
+      this.listeners.delete(listener);
+      if (!this.listeners.size) this.disconnect();
+    };
+  },
+
+  connect(): void {
+    const token = getToken();
+    if (this.socket || !token) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${window.location.host}/ws?token=${encodeURIComponent(token)}`);
+    this.socket = socket;
+
+    socket.onopen = () => {
+      this.open = true;
+      this.emit({ type: 'connected' });
+    };
+    socket.onmessage = (message) => {
+      try {
+        this.emit(JSON.parse(message.data) as JobEvent);
+      } catch {
+        // A frame we cannot parse is not worth tearing the connection down for.
+      }
+    };
+    socket.onerror = () => socket.close();
+    socket.onclose = () => {
+      this.open = false;
+      this.socket = null;
+      this.emit({ type: 'connected' });
+      if (this.listeners.size) {
+        this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
+      }
+    };
+  },
+
+  disconnect(): void {
+    clearTimeout(this.reconnectTimer);
+    this.socket?.close();
+    this.socket = null;
+    this.open = false;
+  },
+
+  emit(event: JobEvent): void {
+    for (const listener of this.listeners) listener(event);
+  },
+};
+
 export interface JobStream {
-  /** Latest progress snapshot per job id. */
+  /** Latest snapshot per job id. */
   progress: Record<string, JobEvent>;
-  /** Rolling log tail for the subscribed job. */
+  /** Rolling log tail for the followed job. */
   events: JobEvent[];
-  /** True while the WebSocket is open; false means the polling fallback is active. */
+  /** False while the polling fallback is carrying updates. */
   live: boolean;
 }
 
-const ACTIVE = new Set(['pending', 'queued', 'processing']);
-
 /**
- * Live job updates over a WebSocket, with an automatic polling fallback so the
- * UI keeps working behind proxies that drop upgrades.
- *
- * Pass a jobId to follow one job, or omit it to receive every job in the
- * organisation (used by the jobs list and the dashboard).
+ * Live job updates, with a REST polling fallback for proxies that drop
+ * WebSocket upgrades. Pass a jobId to follow one job, or omit it to watch every
+ * job in the organisation.
  */
 export function useJobStream(jobId?: string): JobStream {
   const [progress, setProgress] = useState<Record<string, JobEvent>>({});
   const [events, setEvents] = useState<JobEvent[]>([]);
-  const [live, setLive] = useState(false);
-  const socketRef = useRef<WebSocket | null>(null);
+  const [live, setLive] = useState(connection.open);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-
-    let closed = false;
-    let poll: ReturnType<typeof setInterval> | null = null;
-    let retry: ReturnType<typeof setTimeout> | null = null;
+    if (!getToken()) return;
 
     const record = (event: JobEvent) => {
-      if (event.jobId) {
-        setProgress((prev) => ({ ...prev, [event.jobId!]: { ...prev[event.jobId!], ...event } }));
+      if (event.jobId && (!jobId || event.jobId === jobId)) {
+        setProgress((current) => ({
+          ...current,
+          [event.jobId!]: { ...current[event.jobId!], ...event },
+        }));
       }
       if (event.type === 'job.log' || event.type === 'job.status') {
-        setEvents((prev) => [...prev.slice(-99), event]);
+        setEvents((current) => [...current.slice(-99), event]);
       }
     };
 
-    /** Fallback: poll the REST endpoint while any job is still running. */
-    const startPolling = () => {
-      if (poll) return;
-      poll = setInterval(async () => {
-        try {
-          if (jobId) {
-            const { job } = await api.get<{ job: any }>(`/api/jobs/${jobId}`);
-            record({
-              type: 'job.progress',
-              jobId,
-              status: job.status,
-              stage: job.stage,
-              processedRows: job.processed_rows,
-              totalRows: job.total_rows,
-              percent:
-                job.status === 'completed'
-                  ? 100
-                  : job.total_rows
-                    ? Math.round((job.processed_rows / job.total_rows) * 90)
-                    : 0,
-            });
-            if (!ACTIVE.has(job.status) && poll) {
-              clearInterval(poll);
-              poll = null;
-            }
-          } else {
-            const { jobs } = await api.get<{ jobs: any[] }>('/api/jobs?limit=10');
-            for (const job of jobs) {
-              record({
-                type: 'job.progress',
-                jobId: job.id,
-                status: job.status,
-                stage: job.stage,
-                processedRows: job.processed_rows,
-                totalRows: job.total_rows,
-                percent: job.status === 'completed' ? 100 : undefined,
-              });
-            }
-          }
-        } catch {
-          /* transient — the next tick retries */
-        }
-      }, 1500);
-    };
+    const unsubscribe = connection.subscribe((event) => {
+      if (event.type === 'connected') setLive(connection.open);
+      else record(event);
+    });
 
-    const connect = () => {
-      if (closed) return;
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const url = `${proto}://${window.location.host}/ws?token=${encodeURIComponent(token)}${
-        jobId ? `&jobId=${jobId}` : ''
-      }`;
-      const socket = new WebSocket(url);
-      socketRef.current = socket;
-
-      socket.onopen = () => {
-        setLive(true);
-        if (poll) {
-          clearInterval(poll);
-          poll = null;
+    // Polling covers both the fallback case and the first paint.
+    const poll = setInterval(async () => {
+      if (connection.open) return;
+      try {
+        if (jobId) {
+          const { job } = await api.get<{ job: any }>(`/api/jobs/${jobId}`);
+          record(jobProgressFrom(job));
+        } else {
+          const { jobs } = await api.get<{ jobs: any[] }>('/api/jobs?limit=10');
+          jobs.filter((job) => RUNNING.has(job.status)).forEach((job) => record(jobProgressFrom(job)));
         }
-      };
-      socket.onmessage = (msg) => {
-        try {
-          record(JSON.parse(msg.data) as JobEvent);
-        } catch {
-          /* ignore malformed frames */
-        }
-      };
-      socket.onerror = () => socket.close();
-      socket.onclose = () => {
-        setLive(false);
-        socketRef.current = null;
-        if (closed) return;
-        startPolling();
-        retry = setTimeout(connect, 4000);
-      };
-    };
-
-    connect();
-    // Poll once immediately so the first paint is never empty.
-    startPolling();
+      } catch {
+        // Transient; the next tick retries.
+      }
+    }, POLL_MS);
 
     return () => {
-      closed = true;
-      if (poll) clearInterval(poll);
-      if (retry) clearTimeout(retry);
-      socketRef.current?.close();
+      clearInterval(poll);
+      unsubscribe();
     };
   }, [jobId]);
 
   return { progress, events, live };
+}
+
+function jobProgressFrom(job: any): JobEvent {
+  return {
+    type: 'job.progress',
+    jobId: job.id,
+    status: job.status,
+    stage: job.stage,
+    processedRows: job.processed_rows,
+    totalRows: job.total_rows,
+    percent:
+      job.status === 'completed'
+        ? 100
+        : job.total_rows
+          ? Math.round((job.processed_rows / job.total_rows) * 90)
+          : 0,
+  };
 }

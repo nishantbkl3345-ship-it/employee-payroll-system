@@ -1,13 +1,13 @@
-import type { App } from '../http.js';
-import { canSeeEveryone, requireAuth, scopeEmployeeCode } from '../auth/index.js';
+import type { FastifyInstance } from 'fastify';
+import { canSeeEveryone, requireAuth, restrictToOwnEmployeeCode } from '../auth/index.js';
 import type { Db } from '../db/index.js';
-import { toCsv } from '../lib/csv.js';
-
-const day = (v: unknown): string => (v ? String(v).slice(0, 10) : '');
+import { payslipCsv } from '../payroll/csv.js';
+import { sendCsv } from './exports.js';
+import { isUuid } from './params.js';
 
 /** Resolves the job to report on: an explicit ?jobId=, else the latest completed job. */
 async function resolveJobId(db: Db, orgId: string, requested?: string): Promise<string | null> {
-  if (requested && /^[0-9a-f-]{36}$/i.test(requested)) {
+  if (isUuid(requested)) {
     const { rows } = await db.query<{ id: string }>(
       'SELECT id FROM jobs WHERE id = $1 AND org_id = $2',
       [requested, orgId],
@@ -22,11 +22,11 @@ async function resolveJobId(db: Db, orgId: string, requested?: string): Promise<
   return rows[0]?.id ?? null;
 }
 
-export function registerEmployeeRoutes(app: App, db: Db): void {
+export function registerEmployeeRoutes(app: FastifyInstance, db: Db): void {
   /** Employee directory for the organisation. */
   app.get('/api/employees', { preHandler: requireAuth }, async (req, reply) => {
     const q = req.query as Record<string, string>;
-    const scoped = scopeEmployeeCode(req.auth!);
+    const scoped = restrictToOwnEmployeeCode(req.auth!);
     const params: any[] = [req.auth!.orgId];
     let where = 'org_id = $1';
     if (scoped) {
@@ -55,7 +55,7 @@ export function registerEmployeeRoutes(app: App, db: Db): void {
   /** Day-by-day timesheet detail plus the payroll line for one employee. */
   app.get('/api/employees/:code/timesheet', { preHandler: requireAuth }, async (req, reply) => {
     const code = (req.params as any).code as string;
-    const scoped = scopeEmployeeCode(req.auth!);
+    const scoped = restrictToOwnEmployeeCode(req.auth!);
     if (scoped && scoped !== code) {
       return reply.code(403).send({ error: 'forbidden', message: 'You can only view your own timesheet' });
     }
@@ -108,58 +108,40 @@ export function registerEmployeeRoutes(app: App, db: Db): void {
   /** Payslip export for one employee (CSV; the UI also renders a printable view). */
   app.get('/api/employees/:code/payslip.csv', { preHandler: requireAuth }, async (req, reply) => {
     const code = (req.params as any).code as string;
-    const scoped = scopeEmployeeCode(req.auth!);
+    const scoped = restrictToOwnEmployeeCode(req.auth!);
     if (scoped && scoped !== code) {
       return reply.code(403).send({ error: 'forbidden', message: 'You can only download your own payslip' });
     }
     const jobId = await resolveJobId(db, req.auth!.orgId, (req.query as any).jobId);
     if (!jobId) return reply.code(404).send({ error: 'not_found', message: 'No processed payroll job yet' });
 
-    const [orgQ, jobQ, lineQ, rowsQ] = await Promise.all([
-      db.query<any>('SELECT name FROM organizations WHERE id = $1', [req.auth!.orgId]),
+    const [organizations, jobs, lines, shifts] = await Promise.all([
+      db.query<{ name: string }>('SELECT name FROM organizations WHERE id = $1', [req.auth!.orgId]),
       db.query<any>('SELECT filename, period_start, period_end FROM jobs WHERE id = $1', [jobId]),
       db.query<any>('SELECT * FROM payroll_lines WHERE job_id = $1 AND employee_code = $2', [jobId, code]),
       db.query<any>(
-        `SELECT work_date, clock_in, clock_out, hours_worked, regular_hours, overtime_hours, hourly_rate, gross_pay
-         FROM timesheet_rows WHERE job_id = $1 AND employee_code = $2 AND status = 'valid'
+        `SELECT work_date, clock_in, clock_out, hours_worked, regular_hours, overtime_hours,
+                hourly_rate, gross_pay
+         FROM timesheet_rows
+         WHERE job_id = $1 AND employee_code = $2 AND status = 'valid'
          ORDER BY work_date ASC, clock_in ASC`,
         [jobId, code],
       ),
     ]);
-    const line = lineQ.rows[0];
-    if (!line) return reply.code(404).send({ error: 'not_found', message: 'No payroll line for that employee' });
 
-    const job = jobQ.rows[0];
-    const header: unknown[][] = [
-      ['Payslip', orgQ.rows[0]?.name ?? ''],
-      ['Employee', `${line.employee_name} (${line.employee_code})`],
-      ['Department', line.department],
-      ['Pay period', `${day(job.period_start)} to ${day(job.period_end)}`],
-      ['Source file', job.filename],
-      [],
-      ['Earnings', 'Hours', 'Rate', 'Amount'],
-      ['Regular', line.regular_hours, line.hourly_rate, line.regular_pay],
-      ['Overtime', line.overtime_hours, `${line.hourly_rate} x mult`, line.overtime_pay],
-      ['Gross pay', line.total_hours, '', line.gross_pay],
-      [],
-      ['Date', 'Clock in', 'Clock out', 'Hours', 'Regular', 'Overtime', 'Rate', 'Pay'],
-      ...rowsQ.rows.map((r: any) => [
-        day(r.work_date),
-        r.clock_in,
-        r.clock_out,
-        r.hours_worked,
-        r.regular_hours,
-        r.overtime_hours,
-        r.hourly_rate,
-        r.gross_pay,
-      ]),
-    ];
+    const line = lines.rows[0];
+    if (!line) {
+      return reply.code(404).send({ error: 'not_found', message: 'No payroll line for that employee' });
+    }
 
-    const csv = toCsv([], header).replace(/^﻿\r\n/, '﻿');
-    return reply
-      .header('content-type', 'text/csv; charset=utf-8')
-      .header('content-disposition', `attachment; filename="payslip-${code}-${day(job.period_end)}.csv"`)
-      .send(csv);
+    const job = jobs.rows[0];
+    const csv = payslipCsv({
+      organizationName: organizations.rows[0]?.name ?? '',
+      job,
+      line,
+      days: shifts.rows,
+    });
+    return sendCsv(reply, `payslip-${code}-${String(job.period_end ?? '').slice(0, 10)}.csv`, csv);
   });
 
   /** Convenience endpoint for the employee role: "my payslip". */

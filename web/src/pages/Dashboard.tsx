@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DepartmentCostChart, HoursSplitChart, ShareMeter, WeeklyTrendChart } from '../components/charts';
+import { PageHeading } from '../components/PageHeading';
 import { Badge, Card, EmptyState, ErrorNote, ProgressBar, Spinner, StatTile } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -21,27 +22,26 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const { progress } = useJobStream();
 
-  const load = () => {
+  const load = useCallback(() => {
     api
       .get<Overview>('/api/reports/overview')
       .then(setData)
-      .catch((e) => setError(e.message));
-  };
+      .catch((caught) => setError(caught.message));
+  }, []);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
-  // Reload once a running job finishes so the dashboard reflects it.
-  const running = data?.activeJobs ?? [];
+  // Reload once a job that was still running reports completion.
+  const activeJobIds = (data?.activeJobs ?? []).map((job) => job.id).join(',');
   useEffect(() => {
-    for (const job of running) {
-      if (progress[job.id]?.status === 'completed') {
-        load();
-        break;
-      }
-    }
-  }, [progress, running.length]);
+    const finished = activeJobIds
+      .split(',')
+      .filter(Boolean)
+      .some((jobId) => progress[jobId]?.status === 'completed');
+    if (finished) load();
+  }, [progress, activeJobIds, load]);
 
   if (error) return <ErrorNote>{error}</ErrorNote>;
   if (!data)
@@ -288,26 +288,6 @@ function Row({ label, value, hint }: { label: string; value: string; hint?: stri
         {hint && <span className="ml-1 text-xs text-ink-muted">({hint})</span>}
       </span>
       <span className="tnum font-medium text-ink">{value}</span>
-    </div>
-  );
-}
-
-export function PageHeading({
-  title,
-  subtitle,
-  action,
-}: {
-  title: string;
-  subtitle?: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <h1 className="text-xl font-semibold text-ink">{title}</h1>
-        {subtitle && <p className="mt-1 text-sm text-ink-soft">{subtitle}</p>}
-      </div>
-      {action}
     </div>
   );
 }

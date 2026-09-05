@@ -1,137 +1,119 @@
-import type { ErrorCode, ProcessedRow, RawRow, RowError } from './types.js';
-import { isoWeek, parseDate, parseTimeToMinutes, round2, todayISO, weekStart } from './time.js';
+import { parseClockTime, parseWorkDate, roundHours, isoWeek, todayIso, weekStart } from './time.js';
+import type { TimesheetRow, UploadedRow, ValidationError } from './types.js';
 
-export interface ValidationOptions {
-  /** Reference "today"; rows dated after this are rejected. Injectable for tests. */
-  today?: string;
-  /** Optional guard: shifts longer than this (hours) are rejected. Disabled when undefined. */
-  maxShiftHours?: number;
-}
-
-const REQUIRED: Array<[keyof RawRow & string, string]> = [
-  ['employee_id', 'employee_id'],
-  ['employee_name', 'employee_name'],
-  ['department', 'department'],
-  ['date', 'date'],
-  ['clock_in', 'clock_in'],
-  ['clock_out', 'clock_out'],
-  ['hourly_rate', 'hourly_rate'],
-];
-
-const err = (code: ErrorCode, message: string, field?: string): RowError => ({ code, message, field });
-
-const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim());
+const REQUIRED_FIELDS = [
+  'employee_id',
+  'employee_name',
+  'department',
+  'date',
+  'clock_in',
+  'clock_out',
+  'hourly_rate',
+] as const;
 
 /**
- * Field-level validation + per-shift hours for a single row.
+ * Validates one uploaded row and derives the hours it worked.
  *
- * Cross-row rules (duplicates, overlapping shifts) and the regular/overtime
- * split are deliberately *not* handled here: they are set-based and are applied
- * in `resolveDay` / `applyWeeklyOvertime` once rows are grouped.
+ * Only rules that can be decided from the row itself live here. Duplicates and
+ * overlapping shifts need the employee's other rows, so they are applied later
+ * in `resolveWorkday`.
  */
-export function validateRow(raw: RawRow, opts: ValidationOptions = {}): ProcessedRow {
-  const today = opts.today ?? todayISO();
-  const errors: RowError[] = [];
+export function validateTimesheetRow(row: UploadedRow, today = todayIso()): TimesheetRow {
+  const errors: ValidationError[] = [];
 
-  const employeeCode = str(raw.employee_id);
-  const employeeName = str(raw.employee_name);
-  const department = str(raw.department);
-  const dateStr = str(raw.date);
-  const inStr = str(raw.clock_in);
-  const outStr = str(raw.clock_out);
-  const rateStr = str(raw.hourly_rate);
+  const employeeCode = text(row.employee_id);
+  const employeeName = text(row.employee_name);
+  const department = text(row.department);
+  const rawDate = text(row.date);
+  const rawClockIn = text(row.clock_in);
+  const rawClockOut = text(row.clock_out);
+  const rawRate = text(row.hourly_rate);
 
-  for (const [key, label] of REQUIRED) {
-    if (str(raw[key]) === '') errors.push(err('MISSING_FIELD', `${label} is required`, label));
+  for (const field of REQUIRED_FIELDS) {
+    if (text(row[field]) === '') {
+      errors.push({ code: 'MISSING_FIELD', field, message: `${field} is required` });
+    }
   }
 
-  // ---- date ----
   let workDate: string | null = null;
-  if (dateStr !== '') {
-    workDate = parseDate(dateStr);
+  if (rawDate !== '') {
+    workDate = parseWorkDate(rawDate);
     if (!workDate) {
-      errors.push(err('INVALID_DATE', `"${dateStr}" is not a valid calendar date`, 'date'));
+      errors.push({
+        code: 'INVALID_DATE',
+        field: 'date',
+        message: `"${rawDate}" is not a valid date (expected YYYY-MM-DD)`,
+      });
     } else if (workDate > today) {
-      errors.push(err('FUTURE_DATE', `date ${workDate} is in the future`, 'date'));
+      errors.push({ code: 'FUTURE_DATE', field: 'date', message: `date ${workDate} is in the future` });
     }
   }
 
-  // ---- times ----
-  let minutesIn: number | null = null;
-  let minutesOut: number | null = null;
-  if (inStr !== '') {
-    minutesIn = parseTimeToMinutes(inStr);
-    if (minutesIn === null) errors.push(err('INVALID_TIME', `"${inStr}" is not a valid time`, 'clock_in'));
+  const clockInMinutes = rawClockIn === '' ? null : parseClockTime(rawClockIn);
+  const clockOutMinutes = rawClockOut === '' ? null : parseClockTime(rawClockOut);
+
+  if (rawClockIn !== '' && clockInMinutes === null) {
+    errors.push({ code: 'INVALID_TIME', field: 'clock_in', message: `"${rawClockIn}" is not a valid time` });
   }
-  if (outStr !== '') {
-    minutesOut = parseTimeToMinutes(outStr);
-    if (minutesOut === null) errors.push(err('INVALID_TIME', `"${outStr}" is not a valid time`, 'clock_out'));
+  if (rawClockOut !== '' && clockOutMinutes === null) {
+    errors.push({ code: 'INVALID_TIME', field: 'clock_out', message: `"${rawClockOut}" is not a valid time` });
   }
-  if (minutesIn !== null && minutesOut !== null && minutesOut <= minutesIn) {
-    errors.push(
-      err(
-        'CLOCK_OUT_NOT_AFTER_CLOCK_IN',
-        `clock_out (${outStr}) must be after clock_in (${inStr}) on the same shift`,
-        'clock_out',
-      ),
-    );
+  if (clockInMinutes !== null && clockOutMinutes !== null && clockOutMinutes <= clockInMinutes) {
+    errors.push({
+      code: 'CLOCK_OUT_NOT_AFTER_CLOCK_IN',
+      field: 'clock_out',
+      message: `clock_out (${rawClockOut}) must be after clock_in (${rawClockIn})`,
+    });
   }
 
-  // ---- rate ----
   let hourlyRate: number | null = null;
-  if (rateStr !== '') {
-    const cleaned = rateStr.replace(/[$,\s]/g, '');
-    const n = Number(cleaned);
-    if (!Number.isFinite(n)) {
-      errors.push(err('INVALID_RATE', `"${rateStr}" is not a number`, 'hourly_rate'));
-    } else if (n <= 0) {
-      errors.push(err('NON_POSITIVE_RATE', `hourly_rate must be greater than 0 (got ${n})`, 'hourly_rate'));
+  if (rawRate !== '') {
+    const rate = Number(rawRate.replace(/[$,\s]/g, ''));
+    if (!Number.isFinite(rate)) {
+      errors.push({ code: 'INVALID_RATE', field: 'hourly_rate', message: `"${rawRate}" is not a number` });
+    } else if (rate <= 0) {
+      errors.push({
+        code: 'NON_POSITIVE_RATE',
+        field: 'hourly_rate',
+        message: `hourly_rate must be greater than 0 (got ${rate})`,
+      });
     } else {
-      hourlyRate = round2(n);
+      hourlyRate = Math.round(rate * 100) / 100;
     }
   }
 
-  // ---- derived hours ----
-  let hoursWorked = 0;
-  if (minutesIn !== null && minutesOut !== null && minutesOut > minutesIn) {
-    hoursWorked = round2((minutesOut - minutesIn) / 60);
-    if (opts.maxShiftHours !== undefined && hoursWorked > opts.maxShiftHours) {
-      errors.push(
-        err(
-          'IMPLAUSIBLE_SHIFT_LENGTH',
-          `shift of ${hoursWorked}h exceeds the configured maximum of ${opts.maxShiftHours}h`,
-          'clock_out',
-        ),
-      );
-    }
-  }
+  const isValid = errors.length === 0;
+  const hoursWorked =
+    isValid && clockInMinutes !== null && clockOutMinutes !== null
+      ? roundHours((clockOutMinutes - clockInMinutes) / 60)
+      : 0;
 
   return {
-    rowNumber: raw.rowNumber,
+    rowNumber: row.rowNumber,
     employeeCode,
     employeeName,
     department: department || 'Unassigned',
     workDate,
-    clockIn: inStr || null,
-    clockOut: outStr || null,
-    minutesIn,
-    minutesOut,
+    clockIn: rawClockIn || null,
+    clockOut: rawClockOut || null,
+    clockInMinutes,
+    clockOutMinutes,
     hourlyRate,
-    status: errors.length ? 'invalid' : 'valid',
+    status: isValid ? 'valid' : 'invalid',
     errors,
-    hoursWorked: errors.length ? 0 : hoursWorked,
+    hoursWorked,
     regularHours: 0,
     overtimeHours: 0,
+    regularPay: 0,
+    overtimePay: 0,
     grossPay: 0,
     isoWeek: workDate ? isoWeek(workDate) : null,
     weekStart: workDate ? weekStart(workDate) : null,
     attempts: 1,
-    processingMs: 0,
-    raw: { ...raw },
+    raw: { ...row },
   };
 }
 
-export const dayKey = (r: ProcessedRow): string => `${r.employeeCode}|${r.workDate ?? '-'}`;
-export const dupKey = (r: ProcessedRow): string =>
-  `${r.employeeCode}|${r.workDate ?? '-'}|${r.clockIn ?? '-'}`;
-export const weekKey = (r: ProcessedRow): string => `${r.employeeCode}|${r.isoWeek ?? '-'}`;
+function text(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value).trim();
+}

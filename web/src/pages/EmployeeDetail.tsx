@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
+import { PageHeading } from '../components/PageHeading';
 import { Badge, Card, EmptyState, ErrorNote, Spinner, StatTile } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { day, hours, money, num, weekday } from '../lib/format';
-import { PageHeading } from './Dashboard';
 
 interface Detail {
   job: any;

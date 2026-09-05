@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { PageHeading } from '../components/PageHeading';
 import { Badge, Card, EmptyState, ErrorNote, ProgressBar, Spinner } from '../components/ui';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { dateTime, day, duration, money, num } from '../lib/format';
 import { useJobStream } from '../lib/useJobStream';
-import { PageHeading } from './Dashboard';
 
 export default function Jobs() {
   const { canManage } = useAuth();

@@ -20,9 +20,7 @@ declare module 'fastify' {
   }
 }
 
-const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS ?? 10);
-
-export const hashPassword = (plain: string): Promise<string> => bcrypt.hash(plain, BCRYPT_ROUNDS);
+export const hashPassword = (plain: string): Promise<string> => bcrypt.hash(plain, config.bcryptRounds);
 export const verifyPassword = (plain: string, hash: string): Promise<boolean> =>
   bcrypt.compare(plain, hash);
 
@@ -57,16 +55,19 @@ export function verifyToken(token: string): AuthUser | null {
   }
 }
 
-function extractToken(req: FastifyRequest): string | null {
+/**
+ * Header only. Tokens in query strings leak into access logs, proxy logs and
+ * browser history; the WebSocket handshake reads its own `?token=` because
+ * browsers cannot set headers there.
+ */
+function bearerToken(req: FastifyRequest): string | null {
   const header = req.headers.authorization;
-  if (header?.startsWith('Bearer ')) return header.slice(7).trim();
-  const q = (req.query as any)?.token;
-  return typeof q === 'string' && q ? q : null;
+  return header?.startsWith('Bearer ') ? header.slice(7).trim() : null;
 }
 
 /** Attaches `req.auth` when a valid token is present. Returns the user or null. */
 function authenticate(req: FastifyRequest): AuthUser | null {
-  const token = extractToken(req);
+  const token = bearerToken(req);
   const user = token ? verifyToken(token) : null;
   if (user) req.auth = user;
   return user;
@@ -98,13 +99,14 @@ export function requireRole(...roles: Role[]) {
 /** True when the user may see data for every employee in the organisation. */
 export const canSeeEveryone = (user: AuthUser): boolean => user.role === 'admin' || user.role === 'hr';
 
-/** Sentinel that matches no employee: an employee-role user with no linked record. */
-export const NO_EMPLOYEE = '__no_employee__';
+/** Matches no employee, for an employee-role account with no linked record. */
+const NO_EMPLOYEE = '__no_employee__';
 
 /**
- * Employees are restricted to their own records. Returns the employee_code the
- * caller is limited to, or null when unrestricted.
+ * Returns the employee_code the caller is limited to, or null when they may see
+ * the whole organisation. Callers add it to the WHERE clause, so the filter is
+ * applied by the database rather than after the fact.
  */
-export function scopeEmployeeCode(user: AuthUser): string | null {
+export function restrictToOwnEmployeeCode(user: AuthUser): string | null {
   return canSeeEveryone(user) ? null : (user.employeeCode ?? NO_EMPLOYEE);
 }

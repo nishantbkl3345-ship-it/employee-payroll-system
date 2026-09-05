@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { parseUpload } from '../src/payroll/parse.js';
-import { validateRow, dayKey, weekKey } from '../src/payroll/validate.js';
-import { applyWeeklyOvertime, groupBy, resolveDay } from '../src/payroll/compute.js';
-import type { OvertimeRules, ProcessedRow } from '../src/payroll/types.js';
+import { parseTimesheet } from '../src/payroll/parse.js';
+import { validateTimesheetRow } from '../src/payroll/validate.js';
+import {
+  applyWeeklyOvertime,
+  groupBy,
+  payWeekKey,
+  resolveWorkday,
+  workdayKey,
+} from '../src/payroll/calculate.js';
+import type { OvertimeRules, TimesheetRow, UploadedRow } from '../src/payroll/types.js';
 
 const RULES: OvertimeRules = { dailyThreshold: 8, weeklyThreshold: 40, multiplier: 1.5 };
 
@@ -18,11 +24,11 @@ EMP-106,Arjun Rao,Support,2099-01-01,09:00,17:00,18.00
 `;
 
 /** Runs the same three phases the worker pool runs, but sequentially. */
-function pipeline(csv: string, rules = RULES, today = '2025-06-01'): ProcessedRow[] {
-  const parsed = parseUpload(csv);
-  const rows = parsed.rows.map((r) => validateRow(r, { today }));
-  for (const group of groupBy(rows, dayKey).values()) resolveDay(group, rules);
-  for (const group of groupBy(rows, weekKey).values()) applyWeeklyOvertime(group, rules);
+function pipeline(csv: string, rules = RULES, today = '2025-06-01'): TimesheetRow[] {
+  const parsed = parseTimesheet(csv);
+  const rows = parsed.rows.map((r) => validateTimesheetRow(r, today));
+  for (const workday of groupBy(rows, workdayKey).values()) resolveWorkday(workday, rules);
+  for (const week of groupBy(rows, payWeekKey).values()) applyWeeklyOvertime(week, rules);
   return rows;
 }
 
@@ -94,8 +100,8 @@ describe('the brief sample file', () => {
 });
 
 describe('field validation', () => {
-  const row = (over: Partial<Record<string, string>>) =>
-    validateRow(
+  const row = (overrides: Partial<UploadedRow>) =>
+    validateTimesheetRow(
       {
         rowNumber: 2,
         employee_id: 'E1',
@@ -105,9 +111,9 @@ describe('field validation', () => {
         clock_in: '09:00',
         clock_out: '17:00',
         hourly_rate: '20',
-        ...over,
-      } as any,
-      { today: '2025-06-01' },
+        ...overrides,
+      },
+      '2025-06-01',
     );
 
   it('requires every mandatory field', () => {

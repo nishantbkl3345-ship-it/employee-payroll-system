@@ -2,18 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---- data-viz palette (validated: see README > Design decisions) ----------
-   Categorical slots come from a CVD-checked ordering; the app is light-only,
-   so a single set of values is enough. */
 :root {
   color-scheme: light;
-  --viz-surface: #ffffff;
-  --viz-grid: #ececE7;
-  --viz-text: #0b0b0b;
-  --viz-text-soft: #52514e;
-  --series-1: #2a78d6; /* blue   — regular hours / gross pay */
-  --series-2: #eb6834; /* orange — overtime */
-  --series-3: #1baf7a; /* aqua   — always paired with a visible label */
 }
 
 html,

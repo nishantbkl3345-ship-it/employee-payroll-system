@@ -1,8 +1,9 @@
 import type { Db } from '../index.js';
 import { logger } from '../../logger.js';
 import * as m001 from './001_init.js';
+import * as m002 from './002_row_pay_breakdown.js';
 
-const migrations = [m001];
+const migrations = [m001, m002];
 
 export async function migrate(db: Db): Promise<void> {
   await db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
