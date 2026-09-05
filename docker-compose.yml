@@ -1,0 +1,78 @@
+# Full stack: Postgres + Redis + API (also serves the UI) + a dedicated worker.
+#
+#   docker compose up --build
+#   open http://localhost:4000
+#
+# Without Docker the app also runs with zero infrastructure — see the README:
+# it falls back to an embedded Postgres and an in-process queue.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payroll
+      POSTGRES_PASSWORD: payroll
+      POSTGRES_DB: payroll
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U payroll -d payroll']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    command: ['node', 'server/dist/index.js']
+    environment:
+      NODE_ENV: production
+      PORT: '4000'
+      DATABASE_URL: postgres://payroll:payroll@postgres:5432/payroll
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      # The API enqueues; the worker service consumes.
+      INLINE_WORKER: 'false'
+      WORKER_CONCURRENCY: '8'
+      ROW_PROCESSING_DELAY_MS: '4'
+      LOG_PRETTY: 'false'
+    ports:
+      - '4000:4000'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    build: .
+    command: ['node', 'server/dist/worker.js']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://payroll:payroll@postgres:5432/payroll
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      WORKER_CONCURRENCY: '16'
+      MAX_PARALLEL_JOBS: '2'
+      ROW_PROCESSING_DELAY_MS: '4'
+      LOG_PRETTY: 'false'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_started }
+
+volumes:
+  pgdata:
+  redisdata:

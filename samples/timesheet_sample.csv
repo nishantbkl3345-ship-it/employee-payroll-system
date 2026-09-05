@@ -1,0 +1,8 @@
+employee_id,employee_name,department,date,clock_in,clock_out,hourly_rate
+EMP-101,Sara Iyer,Engineering,2025-01-13,09:00,18:00,25.00
+EMP-102,Karan Bhatt,Sales,2025-01-13,09:00,17:00,20.00
+EMP-103,Neha Joshi,Engineering,2025-01-13,10:00,09:30,25.00
+EMP-104,Vikram Das,Support,2025-01-13,08:00,20:00,18.00
+EMP-101,Sara Iyer,Engineering,2025-01-13,09:00,18:00,25.00
+EMP-105,Priya Nair,Sales,2025-01-13,09:00,17:00,-20.00
+EMP-106,Arjun Rao,Support,2099-01-01,09:00,17:00,18.00

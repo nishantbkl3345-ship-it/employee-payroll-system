@@ -1,0 +1,5 @@
+[
+  { "employee_id": "EMP-101", "employee_name": "Sara Iyer", "department": "Engineering", "date": "2025-01-13", "clock_in": "09:00", "clock_out": "18:00", "hourly_rate": 25.0 },
+  { "employee_id": "EMP-102", "employee_name": "Karan Bhatt", "department": "Sales", "date": "2025-01-13", "clock_in": "09:00", "clock_out": "17:00", "hourly_rate": 20.0 },
+  { "employee_id": "EMP-104", "employee_name": "Vikram Das", "department": "Support", "date": "2025-01-13", "clock_in": "08:00", "clock_out": "20:00", "hourly_rate": 18.0 }
+]

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.data/
+uploads/
+.DS_Store
+coverage/
+
+# generated sample (regenerate with: npm run -w server generate -- 10000)
+samples/timesheet_10k.csv
