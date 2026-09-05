@@ -33,15 +33,11 @@ export default function Dashboard() {
     load();
   }, [load]);
 
-  // Reload once a job that was still running reports completion.
-  const activeJobIds = (data?.activeJobs ?? []).map((job) => job.id).join(',');
+  // Refresh the figures whenever a pay run finishes while this page is open.
+  const completedRuns = Object.values(progress).filter((job) => job.status === 'completed').length;
   useEffect(() => {
-    const finished = activeJobIds
-      .split(',')
-      .filter(Boolean)
-      .some((jobId) => progress[jobId]?.status === 'completed');
-    if (finished) load();
-  }, [progress, activeJobIds, load]);
+    if (completedRuns > 0) load();
+  }, [completedRuns, load]);
 
   if (error) return <ErrorNote>{error}</ErrorNote>;
   if (!data)

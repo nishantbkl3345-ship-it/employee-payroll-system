@@ -5,7 +5,7 @@ import { Badge, Card, ErrorNote, ProgressBar, Spinner, StatTile } from '../compo
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { dateTime, duration, money, num, pct } from '../lib/format';
-import { useJobStream } from '../lib/useJobStream';
+import { isJobRunning, useJobStream } from '../lib/useJobStream';
 import LogsTab from './job/LogsTab';
 import MetricsTab from './job/MetricsTab';
 import PayrollTab from './job/PayrollTab';
@@ -20,7 +20,6 @@ const TABS: Array<[Tab, string]> = [
   ['logs', 'Activity log'],
 ];
 
-const RUNNING = ['pending', 'queued', 'processing'];
 
 export default function JobDetail() {
   const { id = '' } = useParams();
@@ -78,7 +77,7 @@ export default function JobDetail() {
 
   const live = progress[id];
   const status = live?.status ?? job.status;
-  const running = RUNNING.includes(status);
+  const running = isJobRunning(status);
   const departments: string[] = (metrics?.byDepartment ?? []).map((d: any) => d.department);
 
   return (

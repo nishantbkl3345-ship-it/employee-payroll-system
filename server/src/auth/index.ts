@@ -97,7 +97,7 @@ export function requireRole(...roles: Role[]) {
 }
 
 /** True when the user may see data for every employee in the organisation. */
-export const canSeeEveryone = (user: AuthUser): boolean => user.role === 'admin' || user.role === 'hr';
+const canSeeEveryone = (user: AuthUser): boolean => user.role === 'admin' || user.role === 'hr';
 
 /** Matches no employee, for an employee-role account with no linked record. */
 const NO_EMPLOYEE = '__no_employee__';

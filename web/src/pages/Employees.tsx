@@ -5,6 +5,8 @@ import { Card, EmptyState, ErrorNote, Spinner } from '../components/ui';
 import { api } from '../lib/api';
 import { day, money, num } from '../lib/format';
 
+const PERIOD_OPTIONS = [1, 3, 6, 12];
+
 interface Employee {
   employee_code: string;
   name: string;
@@ -25,11 +27,11 @@ export default function Employees() {
       api.get<{ employees: Employee[] }>('/api/employees'),
       api.get<{ departments: string[] }>('/api/departments'),
     ])
-      .then(([e, d]) => {
-        setEmployees(e.employees);
-        setDepartments(d.departments);
+      .then(([directory, departmentList]) => {
+        setEmployees(directory.employees);
+        setDepartments(departmentList.departments);
       })
-      .catch((e) => setError(e.message));
+      .catch((caught) => setError(caught.message));
   }, []);
 
   useEffect(() => {
@@ -37,17 +39,19 @@ export default function Employees() {
     if (department !== 'all') params.set('department', department);
     api
       .get<{ rows: any[] }>(`/api/reports/department-history?${params}`)
-      .then((d) => setHistory(d.rows))
+      .then((result) => setHistory(result.rows))
       .catch(() => setHistory([]));
   }, [department, periods]);
 
   const filtered = useMemo(() => {
     if (!employees) return [];
-    const q = query.trim().toLowerCase();
+    const search = query.trim().toLowerCase();
     return employees.filter(
-      (e) =>
-        (department === 'all' || e.department === department) &&
-        (!q || e.name.toLowerCase().includes(q) || e.employee_code.toLowerCase().includes(q)),
+      (employee) =>
+        (department === 'all' || employee.department === department) &&
+        (!search ||
+          employee.name.toLowerCase().includes(search) ||
+          employee.employee_code.toLowerCase().includes(search)),
     );
   }, [employees, query, department]);
 
@@ -75,9 +79,9 @@ export default function Employees() {
               aria-label="Department"
             >
               <option value="all">All departments</option>
-              {departments.map((d) => (
-                <option key={d} value={d}>
-                  {d}
+              {departments.map((name) => (
+                <option key={name} value={name}>
+                  {name}
                 </option>
               ))}
             </select>
@@ -87,9 +91,9 @@ export default function Employees() {
               onChange={(e) => setPeriods(Number(e.target.value))}
               aria-label="Number of pay periods"
             >
-              {[1, 3, 6, 12].map((n) => (
-                <option key={n} value={n}>
-                  Last {n} period{n === 1 ? '' : 's'}
+              {PERIOD_OPTIONS.map((count) => (
+                <option key={count} value={count}>
+                  Last {count} period{count === 1 ? '' : 's'}
                 </option>
               ))}
             </select>
@@ -114,17 +118,22 @@ export default function Employees() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-line">
-                {history.map((r, i) => (
-                  <tr key={`${r.job_id}-${r.department}-${i}`} className="hover:bg-surface-sunken/60">
+                {history.map((period) => (
+                  <tr
+                    key={`${period.job_id}-${period.department}`}
+                    className="hover:bg-surface-sunken/60"
+                  >
                     <td className="td text-ink-soft">
-                      {r.period_start ? `${day(r.period_start)} → ${day(r.period_end)}` : r.filename}
+                      {period.period_start
+                        ? `${day(period.period_start)} → ${day(period.period_end)}`
+                        : period.filename}
                     </td>
-                    <td className="td font-medium">{r.department}</td>
-                    <td className="td tnum text-right">{num(r.employees)}</td>
-                    <td className="td tnum text-right">{num(r.regular_hours)}h</td>
-                    <td className="td tnum text-right text-accent">{num(r.overtime_hours)}h</td>
-                    <td className="td tnum text-right">{money(r.overtime_pay)}</td>
-                    <td className="td tnum text-right font-semibold">{money(r.gross_pay)}</td>
+                    <td className="td font-medium">{period.department}</td>
+                    <td className="td tnum text-right">{num(period.employees)}</td>
+                    <td className="td tnum text-right">{num(period.regular_hours)}h</td>
+                    <td className="td tnum text-right text-accent">{num(period.overtime_hours)}h</td>
+                    <td className="td tnum text-right">{money(period.overtime_pay)}</td>
+                    <td className="td tnum text-right font-semibold">{money(period.gross_pay)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -151,23 +160,23 @@ export default function Employees() {
           <EmptyState title="No employees found" description="Try a different search or department." />
         ) : (
           <ul className="grid gap-px bg-surface-line sm:grid-cols-2 lg:grid-cols-3">
-            {filtered.map((e) => (
-              <li key={e.employee_code} className="bg-white">
+            {filtered.map((employee) => (
+              <li key={employee.employee_code} className="bg-white">
                 <Link
-                  to={`/employees/${encodeURIComponent(e.employee_code)}`}
+                  to={`/employees/${encodeURIComponent(employee.employee_code)}`}
                   className="flex items-center gap-3 px-5 py-3 transition-colors hover:bg-surface-sunken"
                 >
                   <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-50 text-xs font-semibold text-brand-700">
-                    {e.name
+                    {employee.name
                       .split(' ')
-                      .map((p) => p[0])
+                      .map((part) => part[0])
                       .slice(0, 2)
                       .join('')}
                   </span>
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-ink">{e.name}</span>
+                    <span className="block truncate text-sm font-medium text-ink">{employee.name}</span>
                     <span className="block truncate text-xs text-ink-muted">
-                      {e.employee_code} · {e.department}
+                      {employee.employee_code} · {employee.department}
                     </span>
                   </span>
                 </Link>

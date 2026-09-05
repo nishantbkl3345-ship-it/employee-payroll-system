@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { requireAuth, restrictToOwnEmployeeCode } from '../auth/index.js';
+import { requireAuth, requireRole } from '../auth/index.js';
 import { config } from '../config.js';
 import type { Db } from '../db/index.js';
 import { clamp } from './params.js';
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 export function registerReportRoutes(app: FastifyInstance, db: Db): void {
   /**
@@ -119,7 +121,7 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
   /** Operational metrics: throughput, per-row cost and job failure rate. */
   app.get('/api/metrics/ops', { preHandler: requireAuth }, async (req, reply) => {
     const orgId = req.auth!.orgId;
-    const [jobsQ, rowsQ, logsQ] = await Promise.all([
+    const [jobStats, logCounts] = await Promise.all([
       db.query<any>(
         `SELECT COUNT(*)::int AS total,
                 COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
@@ -127,12 +129,9 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
                 COALESCE(AVG(duration_ms) FILTER (WHERE status = 'completed'), 0) AS avg_duration_ms,
                 COALESCE(MAX(duration_ms) FILTER (WHERE status = 'completed'), 0) AS max_duration_ms,
                 COALESCE(AVG(avg_row_ms) FILTER (WHERE status = 'completed'), 0)  AS avg_row_ms,
-                COALESCE(SUM(total_rows), 0)::int AS rows_ingested
+                COALESCE(SUM(total_rows), 0)::int    AS rows_ingested,
+                COALESCE(SUM(retried_rows), 0)::int  AS retried_rows
          FROM jobs WHERE org_id = $1`,
-        [orgId],
-      ),
-      db.query<any>(
-        `SELECT COALESCE(SUM(retried_rows), 0)::int AS retried_rows FROM jobs WHERE org_id = $1`,
         [orgId],
       ),
       db.query<any>(
@@ -141,23 +140,24 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
       ),
     ]);
 
-    const j = jobsQ.rows[0];
-    const total = Number(j.total) || 0;
+    const jobs = jobStats.rows[0];
+    const total = Number(jobs.total) || 0;
+    const failed = Number(jobs.failed);
     return reply.send({
       jobs: {
         total,
-        completed: Number(j.completed),
-        failed: Number(j.failed),
-        failureRatePct: total > 0 ? Math.round((Number(j.failed) / total) * 10000) / 100 : 0,
-        avgDurationMs: Math.round(Number(j.avg_duration_ms)),
-        maxDurationMs: Math.round(Number(j.max_duration_ms)),
-        rowsIngested: Number(j.rows_ingested),
+        completed: Number(jobs.completed),
+        failed,
+        failureRatePct: total > 0 ? round2((failed / total) * 100) : 0,
+        avgDurationMs: Math.round(Number(jobs.avg_duration_ms)),
+        maxDurationMs: Math.round(Number(jobs.max_duration_ms)),
+        rowsIngested: Number(jobs.rows_ingested),
       },
       rows: {
-        avgMsPerRow: Number(Number(j.avg_row_ms).toFixed(3)),
-        retriedRows: Number(rowsQ.rows[0].retried_rows),
+        avgMsPerRow: Number(Number(jobs.avg_row_ms).toFixed(3)),
+        retriedRows: Number(jobs.retried_rows),
       },
-      logLevels: Object.fromEntries(logsQ.rows.map((r: any) => [r.level, r.count])),
+      logLevels: Object.fromEntries(logCounts.rows.map((row: any) => [row.level, row.count])),
       engine: {
         queueDriver: config.redisUrl ? 'bullmq' : 'memory',
         dbDriver: config.databaseUrl ? 'postgres' : 'pglite',
@@ -169,10 +169,7 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
   });
 
   /** Recent system events across the organisation (observability panel). */
-  app.get('/api/logs', { preHandler: requireAuth }, async (req, reply) => {
-    if (restrictToOwnEmployeeCode(req.auth!)) {
-      return reply.code(403).send({ error: 'forbidden', message: 'Logs are restricted to admin and HR' });
-    }
+  app.get('/api/logs', { preHandler: requireRole('admin', 'hr') }, async (req, reply) => {
     const q = req.query as Record<string, string>;
     const limit = clamp(Number(q.limit), 100, 1, 500);
     const params: any[] = [req.auth!.orgId];

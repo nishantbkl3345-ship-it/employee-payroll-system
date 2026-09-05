@@ -330,6 +330,38 @@ describe('multi-tenancy and roles', () => {
       payload: multipart('timesheet.csv', SAMPLE),
     });
     expect(upload.statusCode).toBe(403);
+
+    // Every employee-scoped endpoint shares one authorisation check; assert each
+    // route actually goes through it rather than only the first one.
+    const otherPayslip = await app.inject({
+      method: 'GET',
+      url: `/api/employees/EMP-104/payslip.csv?jobId=${jobId}`,
+      headers: { authorization: `Bearer ${employeeToken}` },
+    });
+    expect(otherPayslip.statusCode).toBe(403);
+
+    const ownPayslip = await app.inject({
+      method: 'GET',
+      url: `/api/employees/EMP-101/payslip.csv?jobId=${jobId}`,
+      headers: { authorization: `Bearer ${employeeToken}` },
+    });
+    expect(ownPayslip.statusCode).toBe(200);
+    expect(ownPayslip.body).toContain('EMP-101');
+    expect(ownPayslip.body).not.toContain('EMP-104');
+
+    const logs = await app.inject({
+      method: 'GET',
+      url: '/api/logs',
+      headers: { authorization: `Bearer ${employeeToken}` },
+    });
+    expect(logs.statusCode).toBe(403);
+
+    const rows = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${jobId}/export/annotated.csv`,
+      headers: { authorization: `Bearer ${employeeToken}` },
+    });
+    expect(rows.body).not.toContain('EMP-104');
   });
 });
 

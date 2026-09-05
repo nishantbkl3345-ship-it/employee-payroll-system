@@ -254,7 +254,7 @@ All `/api` routes except signup and login require `Authorization: Bearer <token>
 | `GET` | `/api/jobs/:id/export/annotated.csv` · `/export/payroll.csv` | downloads |
 | `GET` | `/api/employees` · `/api/departments` · `/api/employees/:code/timesheet` · `/:code/payslip.csv` | |
 | `GET` | `/api/reports/overview` · `/api/reports/department-history` | dashboard, multi-period |
-| `GET` | `/api/metrics/ops` · `/api/logs` · `/healthz` | observability |
+| `GET` | `/api/metrics/ops` · `/api/logs` (admin/HR) · `/healthz` | observability |
 | `WS` | `/ws?token=…` | live progress, scoped to the caller's organisation |
 
 Errors return `{ error, message, requestId }`. 5xx responses carry a generic message;
@@ -330,7 +330,7 @@ npm run typecheck # tsc --noEmit, server + web
 | `validate.test.ts` | every field rule, and the brief's sample file row by row |
 | `calculate.test.ts` | daily/weekly overtime, overlaps, duplicates, configurable rules, week boundaries, pay precision to the cent |
 | `aggregate.test.ts` | department totals, weekly trend and % change, top overtime, standard deviation, overtime %, data-quality counts, idempotent re-runs |
-| `pool.test.ts` | real concurrency, the concurrency limit, retries, isolated permanent failures |
+| `workerPool.test.ts` | real concurrency, the concurrency limit, retries, isolated permanent failures |
 | `api.test.ts` | auth, cross-organisation isolation, employee-role restrictions, upload → process → metrics → export, and a 2,000-row run against hand-computed totals |
 
 Tests run against an in-memory Postgres, so CI needs no services.

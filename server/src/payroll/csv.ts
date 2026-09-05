@@ -5,7 +5,7 @@ const escape = (value: unknown): string => {
 };
 
 /** Minimal RFC4180 writer. The BOM keeps Excel from mangling UTF-8. */
-export function toCsv(headers: string[], rows: unknown[][]): string {
+function toCsv(headers: string[], rows: unknown[][]): string {
   const lines = headers.length ? [headers.map(escape).join(',')] : [];
   for (const row of rows) lines.push(row.map(escape).join(','));
   return `\uFEFF${lines.join('\r\n')}\r\n`;

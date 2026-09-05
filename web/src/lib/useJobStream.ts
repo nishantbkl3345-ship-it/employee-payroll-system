@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, getToken } from './api';
 
 export interface JobEvent {
-  type: 'job.progress' | 'job.status' | 'job.log' | 'connected';
+  type: 'job.progress' | 'job.status' | 'job.log' | 'socket.state';
   jobId?: string;
   status?: string;
   stage?: string;
@@ -15,9 +15,11 @@ export interface JobEvent {
   at?: string;
 }
 
-const RUNNING = new Set(['pending', 'queued', 'processing']);
+const RUNNING_STATUSES = new Set(['pending', 'queued', 'processing']);
 const RECONNECT_MS = 4000;
 const POLL_MS = 1500;
+
+export const isJobRunning = (status?: string): boolean => !!status && RUNNING_STATUSES.has(status);
 
 type Listener = (event: JobEvent) => void;
 
@@ -53,7 +55,7 @@ const connection = {
 
     socket.onopen = () => {
       this.open = true;
-      this.emit({ type: 'connected' });
+      this.emit({ type: 'socket.state' });
     };
     socket.onmessage = (message) => {
       try {
@@ -66,7 +68,7 @@ const connection = {
     socket.onclose = () => {
       this.open = false;
       this.socket = null;
-      this.emit({ type: 'connected' });
+      this.emit({ type: 'socket.state' });
       if (this.listeners.size) {
         this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
       }
@@ -120,20 +122,21 @@ export function useJobStream(jobId?: string): JobStream {
     };
 
     const unsubscribe = connection.subscribe((event) => {
-      if (event.type === 'connected') setLive(connection.open);
+      if (event.type === 'socket.state') setLive(connection.open);
       else record(event);
     });
 
     // Polling covers both the fallback case and the first paint.
     const poll = setInterval(async () => {
       if (connection.open) return;
+      connection.connect();
       try {
         if (jobId) {
           const { job } = await api.get<{ job: any }>(`/api/jobs/${jobId}`);
           record(jobProgressFrom(job));
         } else {
           const { jobs } = await api.get<{ jobs: any[] }>('/api/jobs?limit=10');
-          jobs.filter((job) => RUNNING.has(job.status)).forEach((job) => record(jobProgressFrom(job)));
+          jobs.filter((job) => isJobRunning(job.status)).forEach((job) => record(jobProgressFrom(job)));
         }
       } catch {
         // Transient; the next tick retries.

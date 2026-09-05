@@ -12,11 +12,11 @@ import type { OvertimeRules, RowStatus, TimesheetRow, ValidationError } from './
  */
 
 /** Earnings for a block of hours, in whole cents. */
-export function payCents(hours: number, hourlyRate: number, multiplier = 1): number {
+function payCents(hours: number, hourlyRate: number, multiplier = 1): number {
   return Math.round(hours * Math.round(hourlyRate * 100) * multiplier);
 }
 
-export const fromCents = (cents: number): number => cents / 100;
+const fromCents = (cents: number): number => cents / 100;
 
 export const workdayKey = (row: TimesheetRow): string => `${row.employeeCode}|${row.workDate ?? '-'}`;
 export const payWeekKey = (row: TimesheetRow): string => `${row.employeeCode}|${row.isoWeek ?? '-'}`;

@@ -43,13 +43,6 @@ export interface PayrollJobResult {
   metrics: PayrollMetrics;
 }
 
-export class JobNotFoundError extends Error {
-  constructor(jobId: string) {
-    super(`payroll job ${jobId} not found`);
-    this.name = 'JobNotFoundError';
-  }
-}
-
 /**
  * Runs one uploaded timesheet through the payroll pipeline:
  * parse -> validate -> resolve workdays -> apply weekly overtime -> store -> aggregate.
@@ -181,7 +174,7 @@ async function loadJob(db: Db, jobId: string): Promise<PayrollJob> {
     'SELECT id, org_id, correlation_id, filename, status, rules FROM jobs WHERE id = $1',
     [jobId],
   );
-  if (!rows[0]) throw new JobNotFoundError(jobId);
+  if (!rows[0]) throw new Error(`payroll job ${jobId} not found`);
   return rows[0];
 }
 

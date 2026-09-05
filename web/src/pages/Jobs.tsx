@@ -5,7 +5,7 @@ import { Badge, Card, EmptyState, ErrorNote, ProgressBar, Spinner } from '../com
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { dateTime, day, duration, money, num } from '../lib/format';
-import { useJobStream } from '../lib/useJobStream';
+import { isJobRunning, useJobStream } from '../lib/useJobStream';
 
 export default function Jobs() {
   const { canManage } = useAuth();
@@ -82,7 +82,7 @@ export default function Jobs() {
                 {jobs.map((job) => {
                   const p = progress[job.id];
                   const status = p?.status ?? job.status;
-                  const running = ['pending', 'queued', 'processing'].includes(status);
+                  const running = isJobRunning(status);
                   const processed = p?.processedRows ?? job.processed_rows;
                   return (
                     <tr key={job.id} className="align-top hover:bg-surface-sunken/60">

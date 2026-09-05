@@ -10,6 +10,12 @@ import type { OvertimeRules } from './types.js';
  * the payroll calculator alone, so there is one place to change a pay rule.
  */
 
+/** Department value used for the company-wide row in payroll_weekly. */
+const COMPANY_WIDE = '*';
+const TOP_OVERTIME_LIMIT = 5;
+/** Fewer shifts than this and a standard deviation says nothing useful. */
+const MIN_SHIFTS_FOR_SPREAD = 3;
+
 export interface DepartmentPayroll {
   department: string;
   employees: number;
@@ -166,18 +172,36 @@ async function rebuildWeeklyTotals(db: Db, jobId: string, organizationId: string
     `INSERT INTO payroll_weekly
        (job_id, org_id, iso_week, week_start, department,
         regular_hours, overtime_hours, gross_pay, overtime_pay, employee_count)
-     SELECT $1, $2, iso_week, week_start, COALESCE(department, '*'),
+     SELECT $1, $2, iso_week, week_start, COALESCE(department, $3),
             SUM(regular_hours), SUM(overtime_hours), SUM(gross_pay), SUM(overtime_pay),
             COUNT(DISTINCT employee_code)
      FROM timesheet_rows
      WHERE job_id = $1 AND status = 'valid' AND iso_week IS NOT NULL
      GROUP BY GROUPING SETS ((iso_week, week_start), (iso_week, week_start, department))`,
-    [jobId, organizationId],
+    [jobId, organizationId, COMPANY_WIDE],
   );
 }
 
 async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise<PayrollMetrics> {
-  const totals = one(
+  const { totals, period } = await readCompanyTotals(db, jobId);
+
+  return {
+    rules,
+    totals,
+    period,
+    byDepartment: await readDepartmentPayroll(db, jobId),
+    topOvertime: await readOvertimeLeaders(db, jobId),
+    irregularSchedules: await readIrregularSchedules(db, jobId),
+    weekly: await readWeeklyPayroll(db, jobId),
+    quality: await readDataQuality(db, jobId),
+  };
+}
+
+async function readCompanyTotals(
+  db: Db,
+  jobId: string,
+): Promise<{ totals: PayrollMetrics['totals']; period: PayrollMetrics['period'] }> {
+  const employeeTotals = firstRow(
     await db.query(
       `SELECT COALESCE(SUM(gross_pay), 0)      AS gross_pay,
               COALESCE(SUM(regular_pay), 0)    AS regular_pay,
@@ -193,7 +217,7 @@ async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise
     ),
   );
 
-  const shifts = one(
+  const shiftSpread = firstRow(
     await db.query(
       `SELECT COALESCE(AVG(hours_worked), 0) AS avg_shift_hours,
               COALESCE(STDDEV_SAMP(hours_worked), 0) AS stddev_shift_hours,
@@ -204,7 +228,38 @@ async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise
     ),
   );
 
-  const departments = await db.query(
+  const grossPay = money(employeeTotals.gross_pay);
+  const overtimePay = money(employeeTotals.overtime_pay);
+  const overtimeHours = hours(employeeTotals.overtime_hours);
+  const totalHours = hours(employeeTotals.total_hours);
+  const employees = count(employeeTotals.employees);
+
+  return {
+    totals: {
+      grossPay,
+      regularPay: money(employeeTotals.regular_pay),
+      overtimePay,
+      regularHours: hours(employeeTotals.regular_hours),
+      overtimeHours,
+      totalHours,
+      employees,
+      daysWorked: count(employeeTotals.days_worked),
+      avgHoursPerEmployee: employees > 0 ? hours(totalHours / employees) : 0,
+      avgShiftHours: hours(shiftSpread.avg_shift_hours),
+      overtimePctOfPayroll: percent(overtimePay, grossPay),
+      overtimeHoursPct: percent(overtimeHours, totalHours),
+      stddevShiftHours: hours(shiftSpread.stddev_shift_hours),
+      stddevEmployeeHours: hours(employeeTotals.stddev_employee_hours),
+    },
+    period: {
+      start: asDate(shiftSpread.period_start),
+      end: asDate(shiftSpread.period_end),
+    },
+  };
+}
+
+async function readDepartmentPayroll(db: Db, jobId: string): Promise<DepartmentPayroll[]> {
+  const { rows } = await db.query(
     `SELECT department,
             COUNT(*) AS employees,
             SUM(regular_hours) AS regular_hours, SUM(overtime_hours) AS overtime_hours,
@@ -215,15 +270,44 @@ async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise
     [jobId],
   );
 
-  const topOvertime = await db.query(
+  return rows.map((row) => ({
+    department: row.department,
+    employees: count(row.employees),
+    regularHours: hours(row.regular_hours),
+    overtimeHours: hours(row.overtime_hours),
+    totalHours: hours(row.total_hours),
+    regularPay: money(row.regular_pay),
+    overtimePay: money(row.overtime_pay),
+    grossPay: money(row.gross_pay),
+    overtimePct: percent(money(row.overtime_pay), money(row.gross_pay)),
+  }));
+}
+
+async function readOvertimeLeaders(db: Db, jobId: string): Promise<PayrollMetrics['topOvertime']> {
+  const { rows } = await db.query(
     `SELECT employee_code, employee_name, department, overtime_hours, overtime_pay, total_hours
      FROM payroll_lines
      WHERE job_id = $1 AND overtime_hours > 0
-     ORDER BY overtime_hours DESC, employee_code ASC LIMIT 5`,
-    [jobId],
+     ORDER BY overtime_hours DESC, employee_code ASC LIMIT $2`,
+    [jobId, TOP_OVERTIME_LIMIT],
   );
 
-  const irregular = await db.query(
+  return rows.map((row) => ({
+    employeeCode: row.employee_code,
+    employeeName: row.employee_name,
+    department: row.department,
+    overtimeHours: hours(row.overtime_hours),
+    overtimePay: money(row.overtime_pay),
+    totalHours: hours(row.total_hours),
+  }));
+}
+
+/** Employees whose shift lengths vary the most — a scheduling smell, not a payroll error. */
+async function readIrregularSchedules(
+  db: Db,
+  jobId: string,
+): Promise<PayrollMetrics['irregularSchedules']> {
+  const { rows } = await db.query(
     `SELECT employee_code,
             MAX(employee_name) AS employee_name,
             MAX(department)    AS department,
@@ -233,24 +317,53 @@ async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise
      FROM timesheet_rows
      WHERE job_id = $1 AND status = 'valid'
      GROUP BY employee_code
-     HAVING COUNT(*) >= 3
-     ORDER BY stddev_shift_hours DESC, employee_code ASC LIMIT 5`,
-    [jobId],
+     HAVING COUNT(*) >= $2
+     ORDER BY stddev_shift_hours DESC, employee_code ASC LIMIT $3`,
+    [jobId, MIN_SHIFTS_FOR_SPREAD, TOP_OVERTIME_LIMIT],
   );
 
-  const weeks = await db.query(
+  return rows.map((row) => ({
+    employeeCode: row.employee_code,
+    employeeName: row.employee_name,
+    department: row.department,
+    shifts: count(row.shifts),
+    avgShiftHours: hours(row.avg_shift_hours),
+    stddevShiftHours: hours(row.stddev_shift_hours),
+  }));
+}
+
+async function readWeeklyPayroll(db: Db, jobId: string): Promise<WeeklyPayroll[]> {
+  const { rows } = await db.query(
     `SELECT iso_week, week_start, regular_hours, overtime_hours, gross_pay, overtime_pay, employee_count
-     FROM payroll_weekly WHERE job_id = $1 AND department = '*'
+     FROM payroll_weekly WHERE job_id = $1 AND department = $2
      ORDER BY week_start ASC`,
-    [jobId],
+    [jobId, COMPANY_WIDE],
   );
 
-  const statusCounts = await db.query(
+  return rows.map((row, index, weeks) => {
+    const grossPay = money(row.gross_pay);
+    const previousGrossPay = index > 0 ? money(weeks[index - 1].gross_pay) : 0;
+
+    return {
+      isoWeek: row.iso_week,
+      weekStart: asDate(row.week_start)!,
+      regularHours: hours(row.regular_hours),
+      overtimeHours: hours(row.overtime_hours),
+      grossPay,
+      overtimePay: money(row.overtime_pay),
+      employees: count(row.employee_count),
+      changePct:
+        previousGrossPay > 0 ? round2(((grossPay - previousGrossPay) / previousGrossPay) * 100) : null,
+    };
+  });
+}
+
+async function readDataQuality(db: Db, jobId: string): Promise<PayrollMetrics['quality']> {
+  const { rows: statusCounts } = await db.query(
     `SELECT status, COUNT(*) AS count FROM timesheet_rows WHERE job_id = $1 GROUP BY status`,
     [jobId],
   );
-
-  const errorCounts = await db.query(
+  const { rows: errorCounts } = await db.query(
     `SELECT error->>'code' AS code, COUNT(*) AS count
      FROM timesheet_rows, jsonb_array_elements(errors) AS error
      WHERE job_id = $1
@@ -258,98 +371,27 @@ async function readMetrics(db: Db, jobId: string, rules: OvertimeRules): Promise
     [jobId],
   );
 
-  const byStatus = Object.fromEntries(statusCounts.rows.map((row) => [row.status, count(row.count)]));
+  const byStatus = Object.fromEntries(statusCounts.map((row) => [row.status, count(row.count)]));
   const validRows = byStatus.valid ?? 0;
   const invalidRows = byStatus.invalid ?? 0;
   const duplicateRows = byStatus.duplicate ?? 0;
   const totalRows = validRows + invalidRows + duplicateRows;
 
-  const grossPay = money(totals.gross_pay);
-  const overtimePay = money(totals.overtime_pay);
-  const totalHours = hours(totals.total_hours);
-  const employees = count(totals.employees);
-
   return {
-    rules,
-    totals: {
-      grossPay,
-      regularPay: money(totals.regular_pay),
-      overtimePay,
-      regularHours: hours(totals.regular_hours),
-      overtimeHours: hours(totals.overtime_hours),
-      totalHours,
-      employees,
-      daysWorked: count(totals.days_worked),
-      avgHoursPerEmployee: employees > 0 ? hours(totalHours / employees) : 0,
-      avgShiftHours: hours(shifts.avg_shift_hours),
-      overtimePctOfPayroll: percent(overtimePay, grossPay),
-      overtimeHoursPct: percent(hours(totals.overtime_hours), totalHours),
-      stddevShiftHours: hours(shifts.stddev_shift_hours),
-      stddevEmployeeHours: hours(totals.stddev_employee_hours),
-    },
-    byDepartment: departments.rows.map((row) => ({
-      department: row.department,
-      employees: count(row.employees),
-      regularHours: hours(row.regular_hours),
-      overtimeHours: hours(row.overtime_hours),
-      totalHours: hours(row.total_hours),
-      regularPay: money(row.regular_pay),
-      overtimePay: money(row.overtime_pay),
-      grossPay: money(row.gross_pay),
-      overtimePct: percent(money(row.overtime_pay), money(row.gross_pay)),
-    })),
-    topOvertime: topOvertime.rows.map((row) => ({
-      employeeCode: row.employee_code,
-      employeeName: row.employee_name,
-      department: row.department,
-      overtimeHours: hours(row.overtime_hours),
-      overtimePay: money(row.overtime_pay),
-      totalHours: hours(row.total_hours),
-    })),
-    irregularSchedules: irregular.rows.map((row) => ({
-      employeeCode: row.employee_code,
-      employeeName: row.employee_name,
-      department: row.department,
-      shifts: count(row.shifts),
-      avgShiftHours: hours(row.avg_shift_hours),
-      stddevShiftHours: hours(row.stddev_shift_hours),
-    })),
-    weekly: weeks.rows.map((row, index, all) => {
-      const previousGrossPay = index > 0 ? money(all[index - 1].gross_pay) : null;
-      const grossPayThisWeek = money(row.gross_pay);
-      return {
-        isoWeek: row.iso_week,
-        weekStart: String(row.week_start).slice(0, 10),
-        regularHours: hours(row.regular_hours),
-        overtimeHours: hours(row.overtime_hours),
-        grossPay: grossPayThisWeek,
-        overtimePay: money(row.overtime_pay),
-        employees: count(row.employee_count),
-        changePct:
-          previousGrossPay && previousGrossPay > 0
-            ? round2(((grossPayThisWeek - previousGrossPay) / previousGrossPay) * 100)
-            : null,
-      };
-    }),
-    quality: {
-      totalRows,
-      validRows,
-      invalidRows,
-      duplicateRows,
-      validPct: percent(validRows, totalRows),
-      errorBreakdown: errorCounts.rows.map((row) => ({ code: row.code, count: count(row.count) })),
-    },
-    period: {
-      start: shifts.period_start ? String(shifts.period_start).slice(0, 10) : null,
-      end: shifts.period_end ? String(shifts.period_end).slice(0, 10) : null,
-    },
+    totalRows,
+    validRows,
+    invalidRows,
+    duplicateRows,
+    validPct: percent(validRows, totalRows),
+    errorBreakdown: errorCounts.map((row) => ({ code: row.code, count: count(row.count) })),
   };
 }
 
-function one(result: { rows: any[] }): Record<string, any> {
+function firstRow(result: { rows: any[] }): Record<string, any> {
   return result.rows[0] ?? {};
 }
 
+const asDate = (value: unknown): string | null => (value ? String(value).slice(0, 10) : null);
 const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 const money = (value: unknown): number => round2(Number(value) || 0);
 const hours = (value: unknown): number => round2(Number(value) || 0);
